@@ -1,0 +1,2784 @@
+diff -ruNp kodi-0186c4b/xbmc/Application.cpp kodi-418c88a/xbmc/Application.cpp
+--- kodi-0186c4b/xbmc/Application.cpp	2019-06-27 23:51:11.775157716 +0300
++++ kodi-418c88a/xbmc/Application.cpp	2019-06-21 00:54:58.957849248 +0300
+@@ -3060,8 +3060,9 @@ void CApplication::OnPlayBackStarted(con
+ {
+   CLog::LogF(LOGDEBUG,"CApplication::OnPlayBackStarted");
+ 
+-  // Always update file item stream details
+-  m_appPlayer.SetUpdateStreamDetails();
++  // check if VideoPlayer should set file item stream details from its current streams
++  if (file.GetProperty("get_stream_details_from_player").asBoolean())
++    m_appPlayer.SetUpdateStreamDetails();
+ 
+   if (m_stackHelper.IsPlayingISOStack() || m_stackHelper.IsPlayingRegularStack())
+     m_itemCurrentFile.reset(new CFileItem(*m_stackHelper.GetRegisteredStack(file)));
+diff -ruNp kodi-0186c4b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp kodi-418c88a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp
+--- kodi-0186c4b/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp	2019-06-27 23:51:12.279161921 +0300
++++ kodi-418c88a/xbmc/cores/AudioEngine/Sinks/AESinkALSA.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -55,6 +55,39 @@ static enum AEChannel ALSAChannelMapPass
+   AE_CH_NULL
+ };
+ 
++enum AMLDeviceType
++{
++  AML_NONE, AML_M8AUDIO, AML_MESONAUDIO, AML_AUGESOUND
++};
++
++AMLDeviceType GetAMLDeviceType(const std::string &device)
++{
++  AMLDeviceType amlDeviceType = AML_NONE;
++  if (device.find("AUGESOUND") != std::string::npos)
++    amlDeviceType = AML_AUGESOUND;
++  else if (device.find("MESONAUDIO") != std::string::npos)
++    amlDeviceType = AML_MESONAUDIO;
++  else if (device.find("M8AUDIO") != std::string::npos)
++    amlDeviceType = AML_M8AUDIO;
++  return amlDeviceType;
++}
++
++std::string GetAMLCardName(AMLDeviceType type)
++{
++  switch (type)
++  {
++    case AML_AUGESOUND:
++      return "AUGESOUND";
++    case AML_MESONAUDIO:
++      return "MESONAUDIO";
++    case AML_M8AUDIO:
++      return "M8AUDIO";
++    case AML_NONE:
++    default:
++      return "";
++  }
++}
++
+ static unsigned int ALSASampleRateList[] =
+ {
+   5512,
+@@ -74,19 +107,6 @@ static unsigned int ALSASampleRateList[]
+   0
+ };
+ 
+-static int CheckNP2(unsigned x)
+-{
+-    --x;
+-    x |= x >> 1;
+-    x |= x >> 2;
+-    x |= x >> 4;
+-    x |= x >> 8;
+-    x |= x >> 16;
+-    return ++x;
+-}
+-
+-int speaker_layout = 0;
+-
+ CAESinkALSA::CAESinkALSA() :
+   m_pcm(NULL)
+ {
+@@ -234,7 +254,7 @@ inline CAEChannelInfo CAESinkALSA::GetCh
+ 
+   CLog::Log(LOGDEBUG, "CAESinkALSA::GetChannelLayout - Input Channel Count: %d Output Channel Count: %d", format.m_channelLayout.Count(), info.Count());
+   CLog::Log(LOGDEBUG, "CAESinkALSA::GetChannelLayout - Requested Layout: %s", std::string(format.m_channelLayout).c_str());
+-  CLog::Log(LOGDEBUG, "CAESinkALSA::GetChannelLayout - Got Layout: %s (ALSA: %s) (CEA: %d)", std::string(info).c_str(), alsaMapStr.c_str(), speaker_layout);
++  CLog::Log(LOGDEBUG, "CAESinkALSA::GetChannelLayout - Got Layout: %s (ALSA: %s)", std::string(info).c_str(), alsaMapStr.c_str());
+ 
+   return info;
+ }
+@@ -498,8 +518,6 @@ bool CAESinkALSA::Initialize(AEAudioForm
+   inconfig.format = format.m_dataFormat;
+   inconfig.sampleRate = format.m_sampleRate;
+ 
+-  CLog::Log(LOGINFO, "CAESinkALSA::Initialize - Requested layout: %s", std::string(format.m_channelLayout).c_str());
+-
+   /*
+    * We can't use the better GetChannelLayout() at this point as the device
+    * is not opened yet, and we need inconfig.channels to select the correct
+@@ -519,7 +537,8 @@ bool CAESinkALSA::Initialize(AEAudioForm
+     m_passthrough   = false;
+   }
+ 
+-  if (device.find("M8AUDIO") != std::string::npos)
++  AMLDeviceType amlDeviceType = GetAMLDeviceType(device);
++  if (amlDeviceType != AML_NONE)
+   {
+     int aml_digital_codec = 0;
+ 
+@@ -552,10 +571,6 @@ bool CAESinkALSA::Initialize(AEAudioForm
+           break;
+       }
+     }
+-    else
+-    {
+-      device = "@:CARD=AMLM8AUDIO,DEV=0";
+-    }
+ 
+     aml_set_audio_passthrough(m_passthrough);
+     SysfsUtils::SetInt("/sys/class/audiodsp/digital_codec", aml_digital_codec);
+@@ -616,43 +631,10 @@ bool CAESinkALSA::Initialize(AEAudioForm
+ 
+   if (selectedChmap)
+   {
+-    /* Channel layout should match one of those offered by the sink
+-     * Find out which one it is
+-     */
+-
+-    snd_pcm_chmap_query_t** supportedMaps;
+-    supportedMaps = snd_pcm_query_chmaps(m_pcm);
+-
+-    /* set default stereo */
+-    SysfsUtils::SetInt("/sys/class/amhdmitx/amhdmitx0/aud_ch", 0);
+-    int i = 0;
+-    for (snd_pcm_chmap_query_t* supportedMap = supportedMaps[i++]; supportedMap; supportedMap = supportedMaps[i++])
+-    {
+-      if (ALSAchmapToString(&supportedMap->map) == ALSAchmapToString(selectedChmap)) {
+-        speaker_layout = --i;
+-        SysfsUtils::SetInt("/sys/class/amhdmitx/amhdmitx0/aud_ch", speaker_layout);
+-        break;
+-      }
+-    }
+-
+     /* failure is OK, that likely just means the selected chmap is fixed already */
+     snd_pcm_set_chmap(m_pcm, selectedChmap);
+     free(selectedChmap);
+   }
+-  else
+-  {
+-    /* while i2s driver is broken, this is essential */
+-    if (outconfig.channels == 2 || m_passthrough)
+-    {
+-      SysfsUtils::SetInt("/sys/class/amhdmitx/amhdmitx0/aud_ch", 0);
+-      CLog::Log(LOGINFO, "CAESinkALSA::Initialize - setting default aud_ch to 0");
+-    }
+-    else
+-    {
+-      SysfsUtils::SetInt("/sys/class/amhdmitx/amhdmitx0/aud_ch", 19);
+-      CLog::Log(LOGINFO, "CAESinkALSA::Initialize - setting default aud_ch to 19");
+-    }
+-  }
+ 
+   // we want it blocking
+   snd_pcm_nonblock(m_pcm, 0);
+@@ -814,20 +796,12 @@ bool CAESinkALSA::InitializeHW(const ALS
+   */
+   periodSize  = std::min(periodSize, (snd_pcm_uframes_t) sampleRate / 20);
+   bufferSize  = std::min(bufferSize, (snd_pcm_uframes_t) sampleRate / 5);
+-#if defined(HAS_LIBAMCODEC)
+-  // must be pot for pivos.
+-  bufferSize  = CheckNP2(bufferSize);
+-#endif
+ 
+   /*
+    According to upstream we should set buffer size first - so make sure it is always at least
+    4x period size to not get underruns (some systems seem to have issues with only 2 periods)
+   */
+   periodSize = std::min(periodSize, bufferSize / 4);
+-#if defined(HAS_LIBAMCODEC)
+-  // must be pot for pivos.
+-  periodSize = CheckNP2(periodSize);
+-#endif
+ 
+   CLog::Log(LOGDEBUG, "CAESinkALSA::InitializeHW - Request: periodSize %lu, bufferSize %lu", periodSize, bufferSize);
+ 
+@@ -953,7 +927,7 @@ void CAESinkALSA::Stop()
+ {
+   if (!m_pcm)
+     return;
+-  snd_pcm_drain(m_pcm);
++  snd_pcm_drop(m_pcm);
+ }
+ 
+ void CAESinkALSA::GetDelay(AEDelayStatus& status)
+@@ -1647,9 +1621,12 @@ void CAESinkALSA::EnumerateDevice(AEDevi
+       info.m_dataFormats.push_back(i);
+   }
+ 
+-  if (info.m_displayName.find("AML-M8AUDIO") != std::string::npos && info.m_deviceType != AE_DEVTYPE_HDMI)
++  if (GetAMLDeviceType(info.m_displayName) != AML_NONE)
+   {
+-    info.m_displayNameExtra = "PCM";
++    if (info.m_deviceType == AE_DEVTYPE_IEC958)
++      info.m_displayNameExtra = "S/PDIF";
++    else if (info.m_deviceType != AE_DEVTYPE_HDMI)
++      info.m_displayNameExtra = "PCM";
+   }
+ 
+   if (info.m_deviceType == AE_DEVTYPE_HDMI)
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp	2019-06-27 23:51:12.275161887 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -115,6 +115,7 @@ public:
+   virtual int codec_checkin_pts(codec_para_t *pcodec, unsigned long pts)=0;
+   virtual int codec_get_vbuf_state(codec_para_t *pcodec, struct buf_status *buf)=0;
+   virtual int codec_get_vdec_state(codec_para_t *pcodec, struct vdec_status *vdec)=0;
++  virtual int codec_get_vdec_info(codec_para_t *pcodec, struct vdec_info *vdec) = 0;
+ 
+   virtual int codec_init_cntl(codec_para_t *pcodec)=0;
+   virtual int codec_poll_cntl(codec_para_t *pcodec)=0;
+@@ -142,6 +143,7 @@ class DllLibAmCodec : public DllDynamic,
+   DEFINE_METHOD2(int, codec_checkin_pts,        (codec_para_t *p1, unsigned long p2))
+   DEFINE_METHOD2(int, codec_get_vbuf_state,     (codec_para_t *p1, struct buf_status * p2))
+   DEFINE_METHOD2(int, codec_get_vdec_state,     (codec_para_t *p1, struct vdec_status * p2))
++  DEFINE_METHOD2(int, codec_get_vdec_info,      (codec_para_t *p1, struct vdec_info * p2))
+ 
+   DEFINE_METHOD1(int, codec_init_cntl,          (codec_para_t *p1))
+   DEFINE_METHOD1(int, codec_poll_cntl,          (codec_para_t *p1))
+@@ -164,6 +166,7 @@ class DllLibAmCodec : public DllDynamic,
+     RESOLVE_METHOD(codec_checkin_pts)
+     RESOLVE_METHOD(codec_get_vbuf_state)
+     RESOLVE_METHOD(codec_get_vdec_state)
++    RESOLVE_METHOD(codec_get_vdec_info)
+ 
+     RESOLVE_METHOD(codec_init_cntl)
+     RESOLVE_METHOD(codec_poll_cntl)
+@@ -1466,7 +1469,6 @@ int set_header_info(am_private_t *para)
+ /*************************************************************************/
+ CAMLCodec::CAMLCodec(CProcessInfo &processInfo)
+   : m_opened(false)
+-  , m_ptsIs64us(false)
+   , m_speed(DVD_PLAYSPEED_NORMAL)
+   , m_cur_pts(DVD_NOPTS_VALUE)
+   , m_last_pts(DVD_NOPTS_VALUE)
+@@ -1567,14 +1569,8 @@ bool CAMLCodec::OpenDecoder(CDVDStreamIn
+   if (hints.width == 1920 && am_private->video_rate == 1920)
+   {
+     CLog::Log(LOGDEBUG, "CAMLCodec::OpenDecoder video_rate exception");
+-    am_private->video_rate = 3840;
++    am_private->video_rate = 0.5 + (float)UNIT_FREQ * 1001 / 25000;
+   }
+-  // bypass DI for h264 1080i
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_DEINTERLACING) &&
+-      hints.codec == AV_CODEC_ID_H264 && hints.width == 1920 && am_private->video_rate < 3900)
+-    SysfsUtils::SetString("/sys/module/di/parameters/bypass_all", "1");
+-  else
+-    SysfsUtils::SetString("/sys/module/di/parameters/bypass_all", "0");
+ 
+   // check for SD h264 content incorrectly reported as 60 fsp
+   // mp4/avi containers :(
+@@ -1637,6 +1633,7 @@ bool CAMLCodec::OpenDecoder(CDVDStreamIn
+     hints.aspect, video_ratio.num, video_ratio.den);
+   CLog::Log(LOGDEBUG, "CAMLCodec::OpenDecoder hints.orientation(%d), hints.forced_aspect(%d), hints.extrasize(%d)",
+     hints.orientation, hints.forced_aspect, hints.extrasize);
++  m_processInfo.SetVideoDAR(hints.aspect);
+ 
+   // default video codec params
+   am_private->gcodec.noblock     = 0;
+@@ -1651,10 +1648,10 @@ bool CAMLCodec::OpenDecoder(CDVDStreamIn
+   am_private->gcodec.ratio64     = am_private->video_ratio64;
+   am_private->gcodec.param       = NULL;
+ 
+-  if (am_private->video_format == VFORMAT_VC1)
+-    SysfsUtils::SetInt("/sys/module/di/parameters/bypass_prog", 0);
++  if (am_private->video_format == VFORMAT_VC1) 					/* workaround to fix slowdown VC1 progressive */
++    SysfsUtils::SetInt("/sys/module/di/parameters/di_debug_flag", 0x10000);
+   else
+-    SysfsUtils::SetInt("/sys/module/di/parameters/bypass_prog", 1);
++    SysfsUtils::SetInt("/sys/module/di/parameters/di_debug_flag", 0);
+ 
+   switch(am_private->video_format)
+   {
+@@ -1714,11 +1711,6 @@ bool CAMLCodec::OpenDecoder(CDVDStreamIn
+       if (m_hints.ptsinvalid)
+         am_private->gcodec.param = (void*)(EXTERNAL_PTS | SYNC_OUTSIDE);
+ 
+-      if ((hints.width > 1920) || !CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HEVCWORKAROUND))
+-        SysfsUtils::SetString("/sys/module/amvdec_h265/parameters/dynamic_buf_num_margin", "8");
+-      else
+-        SysfsUtils::SetString("/sys/module/amvdec_h265/parameters/dynamic_buf_num_margin", "16");
+-  	
+       break;
+     case VFORMAT_VP9:
+       am_private->gcodec.format = VIDEO_DEC_FORMAT_VP9;
+@@ -1764,18 +1756,6 @@ bool CAMLCodec::OpenDecoder(CDVDStreamIn
+ 
+   SysfsUtils::SetInt("/sys/class/video/freerun_mode", 1);
+ 
+-
+-  struct utsname un;
+-  if (uname(&un) == 0)
+-  {
+-    int linuxversion[2];
+-    sscanf(un.release,"%d.%d", &linuxversion[0], &linuxversion[1]);
+-    if (linuxversion[0] > 3 || (linuxversion[0] == 3 && linuxversion[1] >= 14))
+-      m_ptsIs64us = true;
+-  }
+-
+-  CLog::Log(LOGNOTICE, "CAMLCodec::OpenDecoder - using V4L2 pts format: %s", m_ptsIs64us ? "64Bit":"32Bit");
+-
+   m_ptsOverflow = 0;
+ 
+   m_opened = true;
+@@ -1801,8 +1781,6 @@ bool CAMLCodec::OpenAmlVideo(const CDVDS
+   m_defaultVfmMap = GetVfmMap("default");
+   SetVfmMap("default", "decoder ppmgr deinterlace amlvideo amvideo");
+ 
+-  SysfsUtils::SetInt("/sys/module/amlvideodri/parameters/freerun_mode", 3);
+-
+   return true;
+ }
+ 
+@@ -1875,15 +1853,6 @@ void CAMLCodec::Reset()
+   if (!m_opened)
+     return;
+ 
+-  if (m_hints.codec == AV_CODEC_ID_HEVC && m_speed >= 0 && m_hints.width <= 1920)
+-  {
+-    if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_HEVCWORKAROUND))
+-    {
+-      CLog::Log(LOGDEBUG, "CAMLCodec::Reset - reopen HEVC");
+-      m_dll->codec_close(&am_private->vcodec);
+-      m_dll->codec_init(&am_private->vcodec);
+-    }
+-  }
+   SetPollDevice(-1);
+ 
+   // set the system blackout_policy to leave the last frame showing
+@@ -1915,7 +1884,7 @@ void CAMLCodec::Reset()
+   SysfsUtils::SetInt("/sys/class/video/blackout_policy", blackout_policy);
+ 
+   // reset some interal vars
+-  m_cur_pts = INT64_0;
++  m_cur_pts = DVD_NOPTS_VALUE;
+   m_ptsOverflow = 0;
+   m_state = 0;
+   m_frameSizes.clear();
+@@ -1988,7 +1957,6 @@ bool CAMLCodec::AddData(uint8_t *pData,
+   // We use this to determine the fill state if no PTS is given
+   if (m_cur_pts == DVD_NOPTS_VALUE)
+   {
+-    m_cur_pts = am_private->am_pkt.avdts;
+     // No PTS given -> use first DTS for AML ptsserver initialization
+     if ((m_state & STATE_HASPTS) == 0)
+       am_private->am_pkt.avpts = am_private->am_pkt.avdts;
+@@ -2035,8 +2003,6 @@ bool CAMLCodec::AddData(uint8_t *pData,
+ 
+ std::atomic_flag CAMLCodec::m_pollSync = ATOMIC_FLAG_INIT;
+ int CAMLCodec::m_pollDevice;
+-bool CAMLCodec::m_releaseFrame = false; 
+-double CAMLCodec::m_ttd = 0;
+ 
+ int CAMLCodec::PollFrame()
+ {
+@@ -2054,7 +2020,6 @@ int CAMLCodec::PollFrame()
+   g_aml_sync_event.Set();
+   int elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - now).count();
+   CLog::Log(LOGDEBUG, LOGAVTIMING, "CAMLCodec::PollFrame elapsed:%0.3fms", elapsed / 1000.0);
+-  m_releaseFrame = true; 
+   return 1;
+ }
+ 
+@@ -2092,8 +2057,8 @@ int CAMLCodec::DequeueBuffer()
+   //Driver change from 10 to 0ms latency, throttle here
+   std::chrono::time_point<std::chrono::system_clock> now(std::chrono::system_clock::now());
+ 
+-  unsigned int waitTime(8);
+-  m_releaseFrame = false;
++  unsigned int waitTime(5);
++  bool timeout(false);
+ DRAIN:
+   if (m_amlVideoFile->IOControl(VIDIOC_DQBUF, &vbuf) < 0)
+   {
+@@ -2105,21 +2070,23 @@ DRAIN:
+     if (elapsed < std::chrono::milliseconds(waitTime))
+       std::this_thread::sleep_for(std::chrono::milliseconds(waitTime) - elapsed);
+ 
+-    CLog::Log(LOGDEBUG, LOGAVTIMING, "CAMLCodec::DequeueBuffer waited:%0.3fms m_rel:%d", 
+-         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - now).count() / 1000.0, m_releaseFrame);
++    timeout = elapsed >= std::chrono::milliseconds(300);
+ 
+-    if (m_drain && elapsed < std::chrono::milliseconds(100))
+-    {
+-      waitTime += 10;
++    if (m_drain && !timeout)
+       goto DRAIN;
+-    }
++
++    if (m_drain && timeout)
++      CLog::Log(LOGDEBUG, LOGAVTIMING, "CAMLCodec::DequeueBuffer timeout!");
+ 
+     return -errno;
+   }
+ 
+-  // Since kernel 3.14 Amlogic changed length and units of PTS values reported here.
+-  // To differentiate such PTS values we check for existence of omx_pts_interval_lower
+-  // parameter, because it was introduced since kernel 3.14.
++  if (m_drain)
++  {
++    int waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - now).count();
++    CLog::Log(LOGDEBUG, LOGAVTIMING, "CAMLCodec::DequeueBuffer waited:%0.3fms", waited / 1000.0);
++  }
++
+   m_last_pts = m_cur_pts;
+ 
+   m_cur_pts = m_ptsOverflow * 100 / 9 + (static_cast<int64_t>(vbuf.timestamp.tv_sec) << 32);
+@@ -2129,6 +2096,9 @@ DRAIN:
+   if ((m_cur_pts - m_hints.pClock->GetClock())  > 0x7F000000LL * 100 / 9)
+     m_cur_pts -= 0x80000000LL * 100 / 9;
+ 
++  CLog::Log(LOGDEBUG, LOGAVTIMING, "CAMLCodec::DequeueBuffer: pts:%0.3f  idx:%d",
++			static_cast<double>(m_cur_pts) /  DVD_TIME_BASE, vbuf.index);
++
+   m_bufferIndex = vbuf.index;
+   return 0;
+ }
+@@ -2146,34 +2116,24 @@ float CAMLCodec::GetTimeSize()
+     m_frameSizes.pop_front();
+     CLog::Log(LOGDEBUG, LOGVIDEO, "CAMLCodec::GetTimeSize: len:%d dl:%d fs:%u front:%u",
+       m_frameSizes.size(), bs.data_len, m_frameSizeSum, m_frameSizes.front());
+-    m_try = 0;
+   }
+   if (bs.free_len < (bs.data_len >> 1))
+-    return 100.0;
++    return 7.0;
+ 
+-  return (float)(m_frameSizes.size()); // * am_private->video_rate) / UNIT_FREQ;
++  return (float)(m_frameSizes.size() * am_private->video_rate) / UNIT_FREQ;
+ }
+ 
+ CDVDVideoCodec::VCReturn CAMLCodec::GetPicture(VideoPicture *pVideoPicture)
+ {
++  std::string vfmt;
++  struct vdec_info vi;
++
+   if (!m_opened)
+     return CDVDVideoCodec::VC_ERROR;
+ 
+   float timesize(GetTimeSize());
+-  m_ttd = static_cast<double>(m_cur_pts) / DVD_TIME_BASE - static_cast<double>(m_hints.pClock->GetClock()) / DVD_TIME_BASE + am_private->video_rate / UNIT_FREQ;
+-  double x = timesize == 0.0 ? 100.0 : m_ttd > 2.0 ? 0.3 / timesize : m_ttd / timesize;
+-  if (!m_releaseFrame && !m_drain && ((x > 0.003 && timesize < 40.0) || (!m_try && timesize < 30.0)))
+-  {
+-    std::string vfmt;
+-    m_try = 1;
+-    if (!SysfsUtils::GetString("/sys/class/deinterlace/di0/frame_format", vfmt) && (vfmt.size() > 4))
+-      m_processInfo.SetVideoInterlaced(vfmt.compare("progressive"));
+-
+-    CLog::Log(LOGDEBUG, "CAMLCodec::GetPicture: VC_BUFFER LEV:%0.2f ttd:%0.0fms x:%0.3f <%s>",
+-		timesize, m_ttd * 1000.0, x, vfmt.c_str());
++  if(!m_drain && timesize < 0.2)
+     return CDVDVideoCodec::VC_BUFFER;
+-  }
+-  m_try = 0;
+ 
+   if (DequeueBuffer() == 0)
+   {
+@@ -2182,18 +2142,29 @@ CDVDVideoCodec::VCReturn CAMLCodec::GetP
+     if (m_last_pts == DVD_NOPTS_VALUE)
+       pVideoPicture->iDuration = static_cast<double>(am_private->video_rate * DVD_TIME_BASE) / UNIT_FREQ;
+     else
+-      pVideoPicture->iDuration = static_cast<double>((0x7FFFFFFF & (m_cur_pts - m_last_pts)) * DVD_TIME_BASE) / PTS_FREQ;
++      pVideoPicture->iDuration = static_cast<double>(0x7FFFFFFF & (m_cur_pts - m_last_pts));
+ 
+     pVideoPicture->dts = DVD_NOPTS_VALUE;
+     pVideoPicture->pts = static_cast<double>(m_cur_pts);
+ 
+-    CLog::Log(LOGDEBUG, LOGVIDEO, "CAMLCodec::GetPicture: index:%u, pts:%0.3lf dur:%0.3lfms overflow:%llX",
+-      m_bufferIndex, pVideoPicture->pts/DVD_TIME_BASE, pVideoPicture->iDuration / 1000.0, m_ptsOverflow);
++    m_dll->codec_get_vdec_info(&am_private->vcodec, &vi);
++    if  (vi.ratio_control ) {
++      m_hints.aspect = 65536.0 / vi.ratio_control;
++      m_processInfo.SetVideoDAR(m_hints.aspect);
++    }
++
++    CLog::Log(LOGDEBUG, LOGVIDEO, "CAMLCodec::GetPicture: index: %u, pts: %0.3lf, dur:%0.0lfms ar:%0.2f",
++		m_bufferIndex, pVideoPicture->pts / DVD_TIME_BASE, pVideoPicture->iDuration / 1000, m_hints.aspect);
+ 
+     return CDVDVideoCodec::VC_PICTURE;
+   }
+   else if (m_drain)
+     return CDVDVideoCodec::VC_EOF;
++  else if (timesize < 1.0)
++    return CDVDVideoCodec::VC_BUFFER;
++
++  if (!SysfsUtils::GetString("/sys/class/deinterlace/di0/frame_format", vfmt) && (vfmt.size() > 4))
++    m_processInfo.SetVideoInterlaced(vfmt.compare("progressive"));
+ 
+   return CDVDVideoCodec::VC_NONE;
+ }
+@@ -2453,10 +2424,10 @@ unsigned int CAMLCodec::GetDecoderVideoR
+   if (m_speed != DVD_PLAYSPEED_NORMAL || m_pollDevice < 0)
+     return 0;
+ 
+-  struct vdec_status vs;
+-  m_dll->codec_get_vdec_state(&am_private->vcodec, &vs);
+-  if (vs.fps > 0)
+-    return static_cast<unsigned int>(0.5 + (static_cast<float>(UNIT_FREQ) / static_cast<float>(vs.fps)));
++  struct vdec_info vi;
++  m_dll->codec_get_vdec_info(&am_private->vcodec, &vi);
++  if (vi.frame_dur > 0)
++    return vi.frame_dur;
+   else
+     return 0;
+ }
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h	2019-06-27 23:51:12.163160953 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/AMLCodec.h	2019-06-20 03:23:56.000000000 +0300
+@@ -70,9 +70,7 @@ private:
+ 
+   DllLibAmCodec   *m_dll;
+   bool             m_opened;
+-  bool             m_ptsIs64us;
+   bool             m_drain = false;
+-  int              m_try = 0;
+   am_private_t    *am_private;
+   CDVDStreamInfo   m_hints;
+   int              m_speed;
+@@ -105,7 +103,6 @@ private:
+ 
+   static std::atomic_flag  m_pollSync;
+   static int m_pollDevice;
+-  static bool m_releaseFrame;
+   static double m_ttd;
+   CProcessInfo &m_processInfo;
+ };
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp	2019-06-27 23:51:12.267161821 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -305,7 +305,7 @@ bool CDVDVideoCodecAmlogic::Open(CDVDStr
+   m_processInfo.SetVideoDecoderName(m_pFormatName, true);
+   m_processInfo.SetVideoDimensions(m_hints.width, m_hints.height);
+   m_processInfo.SetVideoDeintMethod("hardware");
+-  m_processInfo.SetVideoDAR(m_hints.aspect);
++//  m_processInfo.SetVideoDAR(m_hints.aspect);
+ 
+   m_has_keyframe = false;
+ 
+@@ -474,6 +474,9 @@ void CDVDVideoCodecAmlogic::FrameRateTra
+     if (CBitstreamConverter::mpeg2_sequence_header(pData, iSize, m_mpeg2_sequence) &&
+        (m_mpeg2_sequence->fps_rate > 0) && (m_mpeg2_sequence->fps_scale > 0))
+     {
++      if ((m_mpeg2_sequence->fps_rate == 0) || (m_mpeg2_sequence->fps_scale == 0))
++	return; 
++
+       m_mpeg2_sequence_pts = pts;
+       if (m_mpeg2_sequence_pts == DVD_NOPTS_VALUE)
+         m_mpeg2_sequence_pts = dts;
+@@ -501,7 +504,7 @@ void CDVDVideoCodecAmlogic::FrameRateTra
+       m_hints.aspect   = m_mpeg2_sequence->ratio;
+ 
+       m_processInfo.SetVideoFps(m_framerate);
+-      m_processInfo.SetVideoDAR(m_hints.aspect);
++//      m_processInfo.SetVideoDAR(m_hints.aspect);
+     }
+     return;
+   }
+@@ -521,7 +524,6 @@ void CDVDVideoCodecAmlogic::FrameRateTra
+       m_hints.width    = m_h264_sequence->width;
+       m_hints.height   = m_h264_sequence->height;
+       m_hints.aspect   = m_h264_sequence->ratio;
+-      m_processInfo.SetVideoDAR(m_h264_sequence->ratio);
+     }
+   }
+ }
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.cpp kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -10,6 +10,7 @@
+ 
+ #include "ServiceBroker.h"
+ #include "cores/VideoPlayer/DVDCodecs/DVDFactoryCodec.h"
++#include "cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h"
+ #include "settings/Settings.h"
+ #include "settings/SettingsComponent.h"
+ #include "settings/lib/Setting.h"
+@@ -24,137 +25,6 @@ extern "C" {
+ 
+ using namespace KODI::WINDOWING::GBM;
+ 
+-//------------------------------------------------------------------------------
+-// Video Buffers
+-//------------------------------------------------------------------------------
+-
+-CVideoBufferDRMPRIME::CVideoBufferDRMPRIME(IVideoBufferPool& pool, int id)
+-  : CVideoBuffer(id)
+-{
+-  m_pFrame = av_frame_alloc();
+-}
+-
+-CVideoBufferDRMPRIME::~CVideoBufferDRMPRIME()
+-{
+-  Unref();
+-  av_frame_free(&m_pFrame);
+-}
+-
+-void CVideoBufferDRMPRIME::SetRef(AVFrame* frame)
+-{
+-  av_frame_move_ref(m_pFrame, frame);
+-}
+-
+-void CVideoBufferDRMPRIME::Unref()
+-{
+-  av_frame_unref(m_pFrame);
+-}
+-
+-int CVideoBufferDRMPRIME::GetColorEncoding() const
+-{
+-  switch (m_pFrame->colorspace)
+-  {
+-    case AVCOL_SPC_BT2020_CL:
+-    case AVCOL_SPC_BT2020_NCL:
+-      return DRM_COLOR_YCBCR_BT2020;
+-    case AVCOL_SPC_SMPTE170M:
+-    case AVCOL_SPC_BT470BG:
+-    case AVCOL_SPC_FCC:
+-      return DRM_COLOR_YCBCR_BT601;
+-    case AVCOL_SPC_BT709:
+-      return DRM_COLOR_YCBCR_BT709;
+-    case AVCOL_SPC_RESERVED:
+-    case AVCOL_SPC_UNSPECIFIED:
+-    default:
+-      if (m_pFrame->width > 1024 || m_pFrame->height >= 600)
+-        return DRM_COLOR_YCBCR_BT709;
+-      else
+-        return DRM_COLOR_YCBCR_BT601;
+-  }
+-}
+-
+-int CVideoBufferDRMPRIME::GetColorRange() const
+-{
+-  switch (m_pFrame->color_range)
+-  {
+-    case AVCOL_RANGE_JPEG:
+-      return DRM_COLOR_YCBCR_FULL_RANGE;
+-    case AVCOL_RANGE_MPEG:
+-    default:
+-      return DRM_COLOR_YCBCR_LIMITED_RANGE;
+-  }
+-}
+-
+-//------------------------------------------------------------------------------
+-
+-class CVideoBufferPoolDRMPRIME
+-  : public IVideoBufferPool
+-{
+-public:
+-  ~CVideoBufferPoolDRMPRIME();
+-  void Return(int id) override;
+-  CVideoBuffer* Get() override;
+-
+-protected:
+-  CCriticalSection m_critSection;
+-  std::vector<CVideoBufferDRMPRIME*> m_all;
+-  std::deque<int> m_used;
+-  std::deque<int> m_free;
+-};
+-
+-CVideoBufferPoolDRMPRIME::~CVideoBufferPoolDRMPRIME()
+-{
+-  for (auto buf : m_all)
+-    delete buf;
+-}
+-
+-CVideoBuffer* CVideoBufferPoolDRMPRIME::Get()
+-{
+-  CSingleLock lock(m_critSection);
+-
+-  CVideoBufferDRMPRIME* buf = nullptr;
+-  if (!m_free.empty())
+-  {
+-    int idx = m_free.front();
+-    m_free.pop_front();
+-    m_used.push_back(idx);
+-    buf = m_all[idx];
+-  }
+-  else
+-  {
+-    int id = m_all.size();
+-    buf = new CVideoBufferDRMPRIME(*this, id);
+-    m_all.push_back(buf);
+-    m_used.push_back(id);
+-  }
+-
+-  buf->Acquire(GetPtr());
+-  return buf;
+-}
+-
+-void CVideoBufferPoolDRMPRIME::Return(int id)
+-{
+-  CSingleLock lock(m_critSection);
+-
+-  m_all[id]->Unref();
+-  auto it = m_used.begin();
+-  while (it != m_used.end())
+-  {
+-    if (*it == id)
+-    {
+-      m_used.erase(it);
+-      break;
+-    }
+-    else
+-      ++it;
+-  }
+-  m_free.push_back(id);
+-}
+-
+-//------------------------------------------------------------------------------
+-// main class
+-//------------------------------------------------------------------------------
+-
+ CDVDVideoCodecDRMPRIME::CDVDVideoCodecDRMPRIME(CProcessInfo& processInfo)
+   : CDVDVideoCodec(processInfo)
+ {
+@@ -220,11 +90,17 @@ static const AVCodec* FindDecoder(CDVDSt
+   return nullptr;
+ }
+ 
+-static enum AVPixelFormat GetFormat(struct AVCodecContext* avctx, const enum AVPixelFormat* fmt)
++enum AVPixelFormat CDVDVideoCodecDRMPRIME::GetFormat(struct AVCodecContext* avctx, const enum AVPixelFormat* fmt)
+ {
+   for (int n = 0; fmt[n] != AV_PIX_FMT_NONE; n++)
++  {
+     if (fmt[n] == AV_PIX_FMT_DRM_PRIME)
++    {
++      CDVDVideoCodecDRMPRIME* ctx = static_cast<CDVDVideoCodecDRMPRIME*>(avctx->opaque);
++      ctx->UpdateProcessInfo(avctx, fmt[n]);
+       return fmt[n];
++    }
++  }
+ 
+   return AV_PIX_FMT_NONE;
+ }
+@@ -259,6 +135,7 @@ bool CDVDVideoCodecDRMPRIME::Open(CDVDSt
+   }
+ 
+   m_pCodecContext->pix_fmt = AV_PIX_FMT_DRM_PRIME;
++  m_pCodecContext->opaque = static_cast<void*>(this);
+   m_pCodecContext->get_format = GetFormat;
+   m_pCodecContext->codec_tag = hints.codec_tag;
+   m_pCodecContext->coded_width = hints.width;
+@@ -281,27 +158,25 @@ bool CDVDVideoCodecDRMPRIME::Open(CDVDSt
+     return false;
+   }
+ 
+-  if (m_pCodecContext->pix_fmt != AV_PIX_FMT_DRM_PRIME)
+-  {
+-    CLog::Log(LOGNOTICE, "CDVDVideoCodecDRMPRIME::%s - unexpected pix fmt %s", __FUNCTION__, av_get_pix_fmt_name(m_pCodecContext->pix_fmt));
+-    avcodec_free_context(&m_pCodecContext);
+-    return false;
+-  }
+-
+-  const char* pixFmtName = av_get_pix_fmt_name(m_pCodecContext->pix_fmt);
+-  m_processInfo.SetVideoPixelFormat(pixFmtName ? pixFmtName : "");
+-  m_processInfo.SetVideoDimensions(hints.width, hints.height);
++  UpdateProcessInfo(m_pCodecContext, m_pCodecContext->pix_fmt);
+   m_processInfo.SetVideoDeintMethod("none");
+   m_processInfo.SetVideoDAR(hints.aspect);
+ 
+-  if (pCodec->name)
+-    m_name = std::string("ff-") + pCodec->name;
++  return true;
++}
++
++void CDVDVideoCodecDRMPRIME::UpdateProcessInfo(struct AVCodecContext* avctx, const enum AVPixelFormat pix_fmt)
++{
++  const char* pixFmtName = av_get_pix_fmt_name(pix_fmt);
++  m_processInfo.SetVideoPixelFormat(pixFmtName ? pixFmtName : "");
++  m_processInfo.SetVideoDimensions(avctx->coded_width, avctx->coded_height);
++
++  if (avctx->codec && avctx->codec->name)
++    m_name = std::string("ff-") + avctx->codec->name;
+   else
+     m_name = "ffmpeg";
+ 
+-  m_processInfo.SetVideoDecoderName(m_name, true);
+-
+-  return true;
++  m_processInfo.SetVideoDecoderName(m_name, pix_fmt == AV_PIX_FMT_DRM_PRIME);
+ }
+ 
+ bool CDVDVideoCodecDRMPRIME::AddData(const DemuxPacket& packet)
+@@ -412,9 +287,18 @@ CDVDVideoCodec::VCReturn CDVDVideoCodecD
+ 
+   SetPictureParams(pVideoPicture);
+ 
+-  CVideoBufferDRMPRIME* buffer = dynamic_cast<CVideoBufferDRMPRIME*>(m_videoBufferPool->Get());
+-  buffer->SetRef(m_pFrame);
+-  pVideoPicture->videoBuffer = buffer;
++  if (m_pFrame->format == AV_PIX_FMT_DRM_PRIME)
++  {
++    CVideoBufferDRMPRIME* buffer = dynamic_cast<CVideoBufferDRMPRIME*>(m_videoBufferPool->Get());
++    buffer->SetRef(m_pFrame);
++    pVideoPicture->videoBuffer = buffer;
++  }
++
++  if (!pVideoPicture->videoBuffer)
++  {
++    CLog::Log(LOGERROR, "CDVDVideoCodecDRMPRIME::{} - videoBuffer:nullptr format:{}", __FUNCTION__, av_get_pix_fmt_name(static_cast<AVPixelFormat>(m_pFrame->format)));
++    return VC_ERROR;
++  }
+ 
+   return VC_PICTURE;
+ }
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h	2019-06-20 03:23:56.000000000 +0300
+@@ -13,45 +13,6 @@
+ #include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
+ #include "cores/VideoPlayer/Process/VideoBuffer.h"
+ 
+-extern "C" {
+-#include <libavutil/frame.h>
+-#include <libavutil/hwcontext_drm.h>
+-}
+-
+-// Color enums is copied from linux include/drm/drm_color_mgmt.h (strangely not part of uapi)
+-enum drm_color_encoding {
+-  DRM_COLOR_YCBCR_BT601,
+-  DRM_COLOR_YCBCR_BT709,
+-  DRM_COLOR_YCBCR_BT2020,
+-};
+-enum drm_color_range {
+-  DRM_COLOR_YCBCR_LIMITED_RANGE,
+-  DRM_COLOR_YCBCR_FULL_RANGE,
+-};
+-
+-class CVideoBufferPoolDRMPRIME;
+-
+-class CVideoBufferDRMPRIME
+-  : public CVideoBuffer
+-{
+-public:
+-  CVideoBufferDRMPRIME(IVideoBufferPool& pool, int id);
+-  ~CVideoBufferDRMPRIME();
+-  void SetRef(AVFrame* frame);
+-  void Unref();
+-
+-  uint32_t m_fb_id = 0;
+-  uint32_t m_handles[AV_DRM_MAX_PLANES] = {0};
+-
+-  AVDRMFrameDescriptor* GetDescriptor() const { return reinterpret_cast<AVDRMFrameDescriptor*>(m_pFrame->data[0]); }
+-  uint32_t GetWidth() const { return m_pFrame->width; }
+-  uint32_t GetHeight() const { return m_pFrame->height; }
+-  int GetColorEncoding() const;
+-  int GetColorRange() const;
+-protected:
+-  AVFrame* m_pFrame = nullptr;
+-};
+-
+ class CDVDVideoCodecDRMPRIME
+   : public CDVDVideoCodec
+ {
+@@ -73,10 +34,12 @@ public:
+ protected:
+   void Drain();
+   void SetPictureParams(VideoPicture* pVideoPicture);
++  void UpdateProcessInfo(struct AVCodecContext* avctx, const enum AVPixelFormat fmt);
++  static enum AVPixelFormat GetFormat(struct AVCodecContext* avctx, const enum AVPixelFormat* fmt);
+ 
+   std::string m_name;
+   int m_codecControlFlags = 0;
+   AVCodecContext* m_pCodecContext = nullptr;
+   AVFrame* m_pFrame = nullptr;
+-  std::shared_ptr<CVideoBufferPoolDRMPRIME> m_videoBufferPool;
++  std::shared_ptr<IVideoBufferPool> m_videoBufferPool;
+ };
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp kodi-418c88a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp	2019-06-27 23:51:12.267161821 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/DVDDemuxers/DVDDemuxFFmpeg.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -1492,7 +1492,7 @@ CDemuxStream* CDVDDemuxFFmpeg::AddStream
+           st->bInterlaced = true;
+         }
+ 
+-        CLog::Log(LOGDEBUG, "DVDDemuxFFmpeg::%s - fps:%d/%d i/p:%d", __FUNCTION__, st->iFpsRate, st->iFpsScale, st->bInterlaced);
++        CLog::Log(LOGDEBUG, "DVDDemuxFFmpeg::%s - fps:%d/%d%s", __FUNCTION__, st->iFpsRate, st->iFpsScale, st->bInterlaced ? "i" : "p");
+  
+         if (pStream->codec_info_nb_frames > 0 &&
+             pStream->codec_info_nb_frames <= 2 &&
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/CMakeLists.txt kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/CMakeLists.txt
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/CMakeLists.txt	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/CMakeLists.txt	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,7 @@
++set(SOURCES ProcessInfoGBM.cpp
++            VideoBufferDRMPRIME.cpp)
++
++set(HEADERS ProcessInfoGBM.h
++            VideoBufferDRMPRIME.h)
++
++core_add_library(processGBM)
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.cpp kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.cpp	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,34 @@
++/*
++ *  Copyright (C) 2019 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "ProcessInfoGBM.h"
++
++using namespace VIDEOPLAYER;
++
++CProcessInfo* CProcessInfoGBM::Create()
++{
++  return new CProcessInfoGBM();
++}
++
++void CProcessInfoGBM::Register()
++{
++  CProcessInfo::RegisterProcessControl("gbm", CProcessInfoGBM::Create);
++}
++
++CProcessInfoGBM::CProcessInfoGBM()
++{
++}
++
++EINTERLACEMETHOD CProcessInfoGBM::GetFallbackDeintMethod()
++{
++#if defined(__arm__)
++  return EINTERLACEMETHOD::VS_INTERLACEMETHOD_DEINTERLACE_HALF;
++#else
++  return CProcessInfo::GetFallbackDeintMethod();
++#endif
++}
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.h kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.h	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/ProcessInfoGBM.h	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,26 @@
++/*
++ *  Copyright (C) 2019 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include "cores/IPlayer.h"
++#include "cores/VideoPlayer/Process/ProcessInfo.h"
++
++namespace VIDEOPLAYER
++{
++
++class CProcessInfoGBM : public CProcessInfo
++{
++public:
++  CProcessInfoGBM();
++  static CProcessInfo* Create();
++  static void Register();
++  EINTERLACEMETHOD GetFallbackDeintMethod() override;
++};
++
++} // namespace VIDEOPLAYER
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.cpp kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.cpp	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,134 @@
++/*
++ *  Copyright (C) 2017-2018 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "VideoBufferDRMPRIME.h"
++
++#include "threads/SingleLock.h"
++
++extern "C"
++{
++#include <libavcodec/avcodec.h>
++#include <libavutil/pixdesc.h>
++}
++
++IVideoBufferDRMPRIME::IVideoBufferDRMPRIME(int id)
++  : CVideoBuffer(id)
++{
++}
++
++CVideoBufferDRMPRIME::CVideoBufferDRMPRIME(IVideoBufferPool& pool, int id)
++  : IVideoBufferDRMPRIME(id)
++{
++  m_pFrame = av_frame_alloc();
++}
++
++CVideoBufferDRMPRIME::~CVideoBufferDRMPRIME()
++{
++  Unref();
++  av_frame_free(&m_pFrame);
++}
++
++void CVideoBufferDRMPRIME::SetRef(AVFrame* frame)
++{
++  av_frame_move_ref(m_pFrame, frame);
++}
++
++void CVideoBufferDRMPRIME::Unref()
++{
++  av_frame_unref(m_pFrame);
++}
++
++int CVideoBufferDRMPRIME::GetColorEncoding() const
++{
++  switch (m_pFrame->colorspace)
++  {
++  case AVCOL_SPC_BT2020_CL:
++  case AVCOL_SPC_BT2020_NCL:
++    return DRM_COLOR_YCBCR_BT2020;
++  case AVCOL_SPC_SMPTE170M:
++  case AVCOL_SPC_BT470BG:
++  case AVCOL_SPC_FCC:
++    return DRM_COLOR_YCBCR_BT601;
++  case AVCOL_SPC_BT709:
++    return DRM_COLOR_YCBCR_BT709;
++  case AVCOL_SPC_RESERVED:
++  case AVCOL_SPC_UNSPECIFIED:
++  default:
++    if (m_pFrame->width > 1024 || m_pFrame->height >= 600)
++      return DRM_COLOR_YCBCR_BT709;
++    else
++      return DRM_COLOR_YCBCR_BT601;
++  }
++}
++
++int CVideoBufferDRMPRIME::GetColorRange() const
++{
++  switch (m_pFrame->color_range)
++  {
++  case AVCOL_RANGE_JPEG:
++    return DRM_COLOR_YCBCR_FULL_RANGE;
++  case AVCOL_RANGE_MPEG:
++  default:
++    return DRM_COLOR_YCBCR_LIMITED_RANGE;
++  }
++}
++
++bool CVideoBufferDRMPRIME::IsValid() const
++{
++  AVDRMFrameDescriptor* descriptor = GetDescriptor();
++  return descriptor && descriptor->nb_layers;
++}
++
++CVideoBufferPoolDRMPRIME::~CVideoBufferPoolDRMPRIME()
++{
++  for (auto buf : m_all)
++    delete buf;
++}
++
++CVideoBuffer* CVideoBufferPoolDRMPRIME::Get()
++{
++  CSingleLock lock(m_critSection);
++
++  CVideoBufferDRMPRIME* buf = nullptr;
++  if (!m_free.empty())
++  {
++    int idx = m_free.front();
++    m_free.pop_front();
++    m_used.push_back(idx);
++    buf = m_all[idx];
++  }
++  else
++  {
++    int id = m_all.size();
++    buf = new CVideoBufferDRMPRIME(*this, id);
++    m_all.push_back(buf);
++    m_used.push_back(id);
++  }
++
++  buf->Acquire(GetPtr());
++  return buf;
++}
++
++void CVideoBufferPoolDRMPRIME::Return(int id)
++{
++  CSingleLock lock(m_critSection);
++
++  m_all[id]->Unref();
++  auto it = m_used.begin();
++  while (it != m_used.end())
++  {
++    if (*it == id)
++    {
++      m_used.erase(it);
++      break;
++    }
++    else
++      ++it;
++  }
++  m_free.push_back(id);
++}
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,108 @@
++/*
++ *  Copyright (C) 2017-2018 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include "cores/VideoPlayer/Process/VideoBuffer.h"
++
++extern "C"
++{
++#include <libavutil/frame.h>
++#include <libavutil/hwcontext_drm.h>
++}
++
++// Color enums is copied from linux include/drm/drm_color_mgmt.h (strangely not part of uapi)
++enum drm_color_encoding
++{
++  DRM_COLOR_YCBCR_BT601,
++  DRM_COLOR_YCBCR_BT709,
++  DRM_COLOR_YCBCR_BT2020,
++};
++enum drm_color_range
++{
++  DRM_COLOR_YCBCR_LIMITED_RANGE,
++  DRM_COLOR_YCBCR_FULL_RANGE,
++};
++
++class IVideoBufferDRMPRIME : public CVideoBuffer
++{
++public:
++  IVideoBufferDRMPRIME() = delete;
++  virtual ~IVideoBufferDRMPRIME() = default;
++
++  virtual AVDRMFrameDescriptor* GetDescriptor() const = 0;
++  virtual uint32_t GetWidth() const = 0;
++  virtual uint32_t GetHeight() const = 0;
++  virtual int GetColorEncoding() const
++  {
++    return DRM_COLOR_YCBCR_BT709;
++  };
++  virtual int GetColorRange() const
++  {
++    return DRM_COLOR_YCBCR_LIMITED_RANGE;
++  };
++
++  virtual bool IsValid() const
++  {
++    return true;
++  };
++  virtual bool Map()
++  {
++    return true;
++  };
++  virtual void Unmap() {};
++
++  uint32_t m_fb_id = 0;
++  uint32_t m_handles[AV_DRM_MAX_PLANES] = {};
++
++protected:
++  explicit IVideoBufferDRMPRIME(int id);
++};
++
++class CVideoBufferDRMPRIME : public IVideoBufferDRMPRIME
++{
++public:
++  CVideoBufferDRMPRIME(IVideoBufferPool& pool, int id);
++  ~CVideoBufferDRMPRIME();
++  void SetRef(AVFrame* frame);
++  void Unref();
++
++  AVDRMFrameDescriptor* GetDescriptor() const override
++  {
++    return reinterpret_cast<AVDRMFrameDescriptor*>(m_pFrame->data[0]);
++  }
++  uint32_t GetWidth() const override
++  {
++    return m_pFrame->width;
++  }
++  uint32_t GetHeight() const override
++  {
++    return m_pFrame->height;
++  }
++  int GetColorEncoding() const override;
++  int GetColorRange() const override;
++
++  bool IsValid() const override;
++
++protected:
++  AVFrame* m_pFrame = nullptr;
++};
++
++class CVideoBufferPoolDRMPRIME : public IVideoBufferPool
++{
++public:
++  ~CVideoBufferPoolDRMPRIME();
++  void Return(int id) override;
++  CVideoBuffer* Get() override;
++
++protected:
++  CCriticalSection m_critSection;
++  std::vector<CVideoBufferDRMPRIME*> m_all;
++  std::deque<int> m_used;
++  std::deque<int> m_free;
++};
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp	2019-06-27 23:51:12.259161754 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerAudio.cpp	2019-06-21 00:54:59.133850967 +0300
+@@ -230,7 +230,6 @@ void CVideoPlayerAudio::Process()
+   audioframe.nb_frames = 0;
+   audioframe.framesOut = 0;
+   m_audioStats.Start();
+-  m_pts = DVD_NOPTS_VALUE;
+ 
+   bool onlyPrioMsgs = false;
+ 
+@@ -285,9 +284,9 @@ void CVideoPlayerAudio::Process()
+           !m_stalled && m_syncState == IDVDStreamPlayer::SYNC_INSYNC)
+       {
+         // while AE sync is active, we still have time to fill buffers
+-        if (m_syncTimer.IsTimePast() && m_audioClock < m_pClock->GetClock())
++        if (m_syncTimer.IsTimePast())
+         {
+-          CLog::Log(LOGNOTICE, "CVideoPlayerAudio::Process - stream stalled pts:%0.3f clock:%0.3f ", m_audioClock / DVD_TIME_BASE, m_pClock->GetClock() / DVD_TIME_BASE);
++          CLog::Log(LOGNOTICE, "CVideoPlayerAudio::Process - stream stalled");
+           m_stalled = true;
+         }
+       }
+@@ -339,7 +338,6 @@ void CVideoPlayerAudio::Process()
+       m_stalled = true;
+       m_audioClock = 0;
+       audioframe.nb_frames = 0;
+-      m_pts = DVD_NOPTS_VALUE;
+ 
+       if (sync)
+       {
+@@ -422,7 +420,7 @@ void CVideoPlayerAudio::Process()
+       {
+         onlyPrioMsgs = true;
+       }
+-      m_pts = pPacket->pts;
++
+     } // demuxer packet
+ 
+     pMsg->Release();
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerAudio.h kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerAudio.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerAudio.h	2019-06-27 23:51:12.203161287 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerAudio.h	2019-06-20 03:23:56.000000000 +0300
+@@ -40,8 +40,7 @@ public:
+   // waits until all available data has been rendered
+   bool AcceptsData() const override;
+   bool HasData() const override { return m_messageQueue.GetDataSize() > 0; }
+-  int  GetLevel() const override { return (m_pts == DVD_NOPTS_VALUE) || (m_pts < m_pClock->GetClock() + 80000) ?
+-                                           m_messageQueue.GetLevel() : m_messageQueue.GetLevel() + int((m_pts - m_pClock->GetClock() - 80000) / 80000);}
++  int  GetLevel() const override { return m_messageQueue.GetLevel(); }
+   bool IsInited() const override { return m_messageQueue.IsInited(); }
+   void SendMessage(CDVDMsg* pMsg, int priority = 0) override { m_messageQueue.Put(pMsg, priority); }
+   void FlushMessages() override { m_messageQueue.Flush(); }
+@@ -95,7 +94,6 @@ protected:
+ 
+   bool   m_prevskipped;
+   double m_maxspeedadjust;
+-  double	   m_pts;
+ 
+   struct SInfo
+   {
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayer.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayer.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayer.cpp	2019-06-27 23:51:12.251161687 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayer.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -1978,11 +1978,11 @@ void CVideoPlayer::HandlePlaySpeed()
+         {
+           double adjust = -1.0; // a unique value
+           if (m_clock.GetSpeedAdjust() >= 0 && m_VideoPlayerAudio->GetLevel() < 1) {
+-            CLog::Log(LOGDEBUG, "VideoPlayer:Speed adjust:-0.05 aq:%d", m_VideoPlayerAudio->GetLevel());  
++            CLog::Log(LOGDEBUG, "VideoPlayer:Speed adjust:-0.05 aq:%d", m_VideoPlayerAudio->GetLevel());
+              adjust = -0.05;
+           }
+           if (m_clock.GetSpeedAdjust() < 0 && m_VideoPlayerAudio->GetLevel() > 4) {
+-            CLog::Log(LOGDEBUG, "VideoPlayer:Speed adjust:0.0 aq:%d", m_VideoPlayerAudio->GetLevel());  
++            CLog::Log(LOGDEBUG, "VideoPlayer:Speed adjust:0.0 aq:%d", m_VideoPlayerAudio->GetLevel());
+             adjust = 0.0;
+           }
+           if (adjust != -1.0)
+@@ -2046,7 +2046,7 @@ void CVideoPlayer::HandlePlaySpeed()
+       else if (m_CurrentAudio.starttime != DVD_NOPTS_VALUE && m_CurrentAudio.packets > 0)
+       {
+         if (m_pInputStream->IsRealtime())
+-          clock = m_CurrentAudio.starttime - m_CurrentAudio.cachetime - DVD_MSEC_TO_TIME(800);
++          clock = m_CurrentAudio.starttime - m_CurrentAudio.cachetime - DVD_MSEC_TO_TIME(1000);
+         else
+           clock = m_CurrentAudio.starttime - m_CurrentAudio.cachetime;
+ 
+@@ -2061,7 +2061,7 @@ void CVideoPlayer::HandlePlaySpeed()
+           {
+             int audioLevel = m_VideoPlayerAudio->GetLevel();
+             //@todo hardcoded 8 seconds in message queue
+-            double maxAudioTime = clock + DVD_MSEC_TO_TIME(80 * audioLevel);
++            double maxAudioTime = clock + DVD_MSEC_TO_TIME(40 * audioLevel);
+             if ((m_CurrentVideo.starttime - m_CurrentVideo.cachetotal) > maxAudioTime)
+               clock = maxAudioTime;
+             else
+@@ -2682,9 +2682,10 @@ void CVideoPlayer::HandleMessages()
+       if (m_pInputStream->GetIPosTime() == nullptr)
+         time -= m_State.time_offset/1000l;
+ 
+-      CLog::Log(LOGDEBUG, LOGVIDEO, "CVideoPlayer::HandleMessages: demuxer seek to: %0.3f", time / 1000.0);
++      CLog::Log(LOGDEBUG, "demuxer seek to: %f", time);
+       if (m_pDemuxer && m_pDemuxer->SeekTime(time, msg.GetBackward(), &start))
+       {
++        CLog::Log(LOGDEBUG, "demuxer seek to: %f, success", time);
+         if(m_pSubtitleDemuxer)
+         {
+           if(!m_pSubtitleDemuxer->SeekTime(time, msg.GetBackward()))
+@@ -2698,7 +2699,7 @@ void CVideoPlayer::HandleMessages()
+         m_State.lastSeek = m_clock.GetAbsoluteClock();
+ 
+         FlushBuffers(start, msg.GetAccurate(), msg.GetSync());
+-        CLog::Log(LOGDEBUG, LOGVIDEO, "CVideoPlayer::HandleMessages: flush buffers: dts:%0.3f lastSeek:%0.3f clock:%0.3f", start / 1000000., m_State.lastSeek / 1000.0, m_clock.GetClock() / 1000000.0);
++        CLog::Log(LOGDEBUG, LOGVIDEO, "CVideoPlayer::HandleMessages: flush buffers: dts:%0.3f lastSeek:%0.3f clock:%0.3f", start / 1000000., m_State.lastSeek / 1000000.0, m_clock.GetClock() / 1000000.0);
+       }
+       else if (m_pDemuxer)
+       {
+@@ -3083,7 +3084,7 @@ void CVideoPlayer::SetCaching(ECacheStat
+   if(m_caching == state)
+     return;
+ 
+-  CLog::Log(LOGDEBUG, LOGVIDEO, "CVideoPlayer::SetCaching - caching state %d clock:%0.3f start pts:%0.3f", 
++  CLog::Log(LOGDEBUG, LOGVIDEO, "CVideoPlayer::SetCaching - caching state %d clock:%0.3f start pts:%0.3f",
+     state, m_clock.GetClock() / 1000000.0, m_CurrentVideo.starttime == DVD_NOPTS_VALUE ? -1.0 : m_CurrentVideo.starttime / 1000000.0);
+   if (state == CACHESTATE_FULL ||
+       state == CACHESTATE_INIT)
+@@ -5046,6 +5047,7 @@ void CVideoPlayer::OnLostDisplay()
+   m_VideoPlayerVideo->SendMessage(new CDVDMsgBool(CDVDMsg::GENERAL_PAUSE, true), 1);
+   m_clock.Pause(true);
+   m_displayLost = true;
++  FlushRenderer();
+ }
+ 
+ void CVideoPlayer::OnResetDisplay()
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp	2019-06-27 23:51:12.267161821 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerVideo.cpp	2019-06-21 00:54:59.133850967 +0300
+@@ -297,25 +297,25 @@ bool CVideoPlayerVideo::IsInited() const
+ inline void CVideoPlayerVideo::SendMessage(CDVDMsg* pMsg, int priority)
+ {
+   m_messageQueue.Put(pMsg, priority);
+-  SetLevel();
++  m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }
+ 
+ inline void CVideoPlayerVideo::SendMessageBack(CDVDMsg* pMsg, int priority)
+ {
+   m_messageQueue.PutBack(pMsg, priority);
+-  SetLevel();
++  m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }
+ 
+ inline void CVideoPlayerVideo::FlushMessages()
+ {
+   m_messageQueue.Flush();
+-  SetLevel();
++  m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+ }
+ 
+ inline MsgQueueReturnCode CVideoPlayerVideo::GetMessage(CDVDMsg** pMsg, unsigned int iTimeoutInMilliSeconds, int &priority)
+ {
+   MsgQueueReturnCode ret = m_messageQueue.Get(pMsg, iTimeoutInMilliSeconds, priority);
+-  SetLevel();
++  m_processInfo.SetLevelVQ(m_messageQueue.GetLevel());
+   return ret;
+ }
+ 
+@@ -335,11 +335,10 @@ void CVideoPlayerVideo::Process()
+   m_iDroppedFrames = 0;
+   m_rewindStalled = false;
+   m_outputSate = OUTPUT_NORMAL;
+-  m_pts = DVD_NOPTS_VALUE;
+ 
+   while (!m_bStop)
+   {
+-    int iQueueTimeOut = (int)(m_stalled ? frametime * 10 : frametime * 11) / 10000;
++    int iQueueTimeOut = (int)(m_stalled ? frametime : frametime * 10) / 1000;
+     int iPriority = 0;
+ 
+     if (m_syncState == IDVDStreamPlayer::SYNC_WAITSYNC)
+@@ -473,7 +472,6 @@ void CVideoPlayerVideo::Process()
+       m_packets.clear();
+       pts = 0;
+       m_rewindStalled = false;
+-      m_pts = DVD_NOPTS_VALUE;
+ 
+       m_ptsTracker.Flush();
+       //we need to recalculate the framerate
+@@ -601,7 +599,6 @@ void CVideoPlayerVideo::Process()
+         {
+           onlyPrioMsgs = true;
+         }
+-        m_pts = pPacket->pts;
+       }
+       else
+       {
+@@ -941,17 +938,17 @@ CVideoPlayerVideo::EOutputState CVideoPl
+   }
+ 
+   int timeToDisplay = DVD_TIME_TO_MSEC(pPicture->pts - iPlayingClock);
+-  std::chrono::time_point<std::chrono::system_clock> now(std::chrono::system_clock::now());
+ 
+   // make sure waiting time is not negative
+   int maxWaitTime = std::min(std::max(timeToDisplay + 500, 50), 500);
+   // don't wait when going ff
+   if (m_speed > DVD_PLAYSPEED_NORMAL)
+     maxWaitTime = std::max(timeToDisplay, 0);
+-  int buffer = m_renderManager.WaitForBuffer(m_bAbortOutput, maxWaitTime);
+-  CLog::Log(LOGDEBUG,"CVideoPlayerVideo::%s - ttd:%dms pts:%0.3lf Clock:%0.3f Level:%d elapsed:%0.3fms",
+-        __FUNCTION__, timeToDisplay, pPicture->pts/1000000, iPlayingClock/1000000.0, buffer, std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - now).count() / 1000.0);
+-  if (buffer < 0)
++
++  int level = m_renderManager.WaitForBuffer(m_bAbortOutput, maxWaitTime);
++  CLog::Log(LOGDEBUG,"CVideoPlayerVideo::%s - ttd:%dms pts:%0.3lf Clock:%0.3f Level:%d",
++        __FUNCTION__, timeToDisplay, pPicture->pts / DVD_TIME_BASE, static_cast<double>(iPlayingClock) / DVD_TIME_BASE, level);
++  if (level < 0)
+   {
+     return OUTPUT_AGAIN;
+   }
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoPlayerVideo.h	2019-06-27 23:51:12.251161687 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoPlayerVideo.h	2019-06-20 03:23:56.000000000 +0300
+@@ -75,7 +75,6 @@ public:
+   // classes
+   CDVDOverlayContainer* m_pOverlayContainer;
+   CDVDClock* m_pClock;
+-  double m_pts;
+ 
+ protected:
+ 
+@@ -101,8 +100,6 @@ protected:
+   void ResetFrameRateCalc();
+   void CalcFrameRate();
+   int CalcDropRequirement(double pts);
+-  void SetLevel(){ m_processInfo.SetLevelVQ((m_pts == DVD_NOPTS_VALUE) || (m_pts < m_pClock->GetClock() + 80000) ?
+-                     m_messageQueue.GetLevel() : m_messageQueue.GetLevel() + int((m_pts - m_pClock->GetClock() - 80000) / 80000));}
+ 
+   double m_iSubtitleDelay;
+ 
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -15,11 +15,14 @@ void CDRMPRIMETexture::Init(EGLDisplay e
+   m_eglImage.reset(new CEGLImage(eglDisplay));
+ }
+ 
+-bool CDRMPRIMETexture::Map(CVideoBufferDRMPRIME *buffer)
++bool CDRMPRIMETexture::Map(IVideoBufferDRMPRIME* buffer)
+ {
+   if (m_primebuffer)
+     return true;
+ 
++  if (!buffer->Map())
++    return false;
++
+   m_texWidth = buffer->GetWidth();
+   m_texHeight = buffer->GetHeight();
+ 
+@@ -74,6 +77,8 @@ void CDRMPRIMETexture::Unmap()
+ 
+   glDeleteTextures(1, &m_texture);
+ 
++  m_primebuffer->Unmap();
++
+   m_primebuffer->Release();
+   m_primebuffer = nullptr;
+ }
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/DRMPRIMEEGL.h	2019-06-20 03:23:56.000000000 +0300
+@@ -8,15 +8,16 @@
+ 
+ #pragma once
+ 
+-#include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h"
++#include "cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h"
+ #include "utils/EGLImage.h"
++#include "utils/Geometry.h"
+ 
+ #include "system_gl.h"
+ 
+ class CDRMPRIMETexture
+ {
+ public:
+-  bool Map(CVideoBufferDRMPRIME *buffer);
++  bool Map(IVideoBufferDRMPRIME* buffer);
+   void Unmap();
+   void Init(EGLDisplay eglDisplay);
+ 
+@@ -24,7 +25,7 @@ public:
+   CSizeInt GetTextureSize() { return { m_texWidth, m_texHeight }; }
+ 
+ protected:
+-  CVideoBufferDRMPRIME *m_primebuffer{nullptr};
++  IVideoBufferDRMPRIME* m_primebuffer{nullptr};
+   std::unique_ptr<CEGLImage> m_eglImage;
+ 
+   const GLenum m_textureTarget{GL_TEXTURE_EXTERNAL_OES};
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp	2019-06-27 23:51:12.079160252 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -159,6 +159,12 @@ void CRendererAML::Reset()
+   }
+ }
+ 
++bool CRendererAML::Flush(bool saveBuffers)
++{
++  Reset();
++  return saveBuffers;
++};
++
+ void CRendererAML::RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha)
+ {
+   ManageRenderArea();
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h	2019-06-27 23:51:12.139160753 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererAML.h	2019-06-20 03:23:56.000000000 +0300
+@@ -31,6 +31,7 @@ public:
+   virtual void Update() override {};
+   virtual void RenderUpdate(int index, int index2, bool clear, unsigned int flags, unsigned int alpha) override;
+   virtual bool SupportsMultiPassRendering()override { return false; };
++  virtual bool Flush(bool saveBuffers) override;
+ 
+   // Player functions
+   virtual bool IsGuiLayer() override { return false; };
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIME.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -8,20 +8,21 @@
+ 
+ #include "RendererDRMPRIME.h"
+ 
+-#include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h"
++#include "ServiceBroker.h"
++#include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodec.h"
++#include "cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h"
+ #include "cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.h"
+ #include "cores/VideoPlayer/VideoRenderers/RenderCapture.h"
+ #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
+ #include "cores/VideoPlayer/VideoRenderers/RenderFlags.h"
+-#include "settings/lib/Setting.h"
+ #include "settings/DisplaySettings.h"
+ #include "settings/Settings.h"
+ #include "settings/SettingsComponent.h"
++#include "settings/lib/Setting.h"
+ #include "utils/log.h"
++#include "windowing/GraphicContext.h"
+ #include "windowing/gbm/DRMAtomic.h"
+ #include "windowing/gbm/WinSystemGbm.h"
+-#include "windowing/GraphicContext.h"
+-#include "ServiceBroker.h"
+ 
+ using namespace KODI::WINDOWING::GBM;
+ 
+@@ -34,7 +35,7 @@ CRendererDRMPRIME::~CRendererDRMPRIME()
+ 
+ CBaseRenderer* CRendererDRMPRIME::Create(CVideoBuffer* buffer)
+ {
+-  if (buffer && dynamic_cast<CVideoBufferDRMPRIME*>(buffer) &&
++  if (buffer && dynamic_cast<IVideoBufferDRMPRIME*>(buffer) &&
+       CServiceBroker::GetSettingsComponent()->GetSettings()->GetInt(SETTING_VIDEOPLAYER_USEPRIMERENDERER) == 0)
+   {
+     CWinSystemGbm* winSystem = dynamic_cast<CWinSystemGbm*>(CServiceBroker::GetWinSystem());
+@@ -132,7 +133,7 @@ bool CRendererDRMPRIME::NeedBuffer(int i
+   if (m_iLastRenderBuffer == index)
+     return true;
+ 
+-  CVideoBufferDRMPRIME* buffer = dynamic_cast<CVideoBufferDRMPRIME*>(m_buffers[index].videoBuffer);
++  IVideoBufferDRMPRIME* buffer = dynamic_cast<IVideoBufferDRMPRIME*>(m_buffers[index].videoBuffer);
+   if (buffer && buffer->m_fb_id)
+     return true;
+ 
+@@ -162,12 +163,8 @@ void CRendererDRMPRIME::RenderUpdate(int
+     return;
+   }
+ 
+-  CVideoBufferDRMPRIME* buffer = dynamic_cast<CVideoBufferDRMPRIME*>(m_buffers[index].videoBuffer);
+-  if (!buffer)
+-    return;
+-
+-  AVDRMFrameDescriptor* descriptor = buffer->GetDescriptor();
+-  if (!descriptor || !descriptor->nb_layers)
++  IVideoBufferDRMPRIME* buffer = dynamic_cast<IVideoBufferDRMPRIME*>(m_buffers[index].videoBuffer);
++  if (!buffer || !buffer->IsValid())
+     return;
+ 
+   if (!m_videoLayerBridge)
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -10,10 +10,12 @@
+ 
+ #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
+ #include "ServiceBroker.h"
++#include "utils/EGLFence.h"
+ #include "utils/log.h"
+ #include "windowing/gbm/WinSystemGbmGLESContext.h"
+ 
+ using namespace KODI::WINDOWING::GBM;
++using namespace KODI::UTILS::EGL;
+ 
+ CRendererDRMPRIMEGLES::~CRendererDRMPRIMEGLES()
+ {
+@@ -23,7 +25,7 @@ CRendererDRMPRIMEGLES::~CRendererDRMPRIM
+ 
+ CBaseRenderer* CRendererDRMPRIMEGLES::Create(CVideoBuffer* buffer)
+ {
+-  if (buffer && dynamic_cast<CVideoBufferDRMPRIME*>(buffer))
++  if (buffer && dynamic_cast<IVideoBufferDRMPRIME*>(buffer))
+     return new CRendererDRMPRIMEGLES();
+ 
+   return nullptr;
+@@ -43,15 +45,27 @@ bool CRendererDRMPRIMEGLES::Configure(co
+   for (auto &texture : m_DRMPRIMETextures)
+     texture.Init(winSystem->GetEGLDisplay());
+ 
++  for (auto& fence : m_fences)
++  {
++    fence.reset(new CEGLFence(winSystem->GetEGLDisplay()));
++  }
++
+   return CLinuxRendererGLES::Configure(picture, fps, orientation);
+ }
+ 
+ void CRendererDRMPRIMEGLES::ReleaseBuffer(int index)
+ {
++  m_fences[index]->DestroyFence();
++
+   m_DRMPRIMETextures[index].Unmap();
+   CLinuxRendererGLES::ReleaseBuffer(index);
+ }
+ 
++bool CRendererDRMPRIMEGLES::NeedBuffer(int index)
++{
++  return !m_fences[index]->IsSignaled();
++}
++
+ bool CRendererDRMPRIMEGLES::CreateTexture(int index)
+ {
+   CPictureBuffer &buf = m_buffers[index];
+@@ -85,9 +99,9 @@ bool CRendererDRMPRIMEGLES::UploadTextur
+ {
+   CPictureBuffer &buf = m_buffers[index];
+ 
+-  CVideoBufferDRMPRIME *buffer = dynamic_cast<CVideoBufferDRMPRIME*>(buf.videoBuffer);
++  IVideoBufferDRMPRIME* buffer = dynamic_cast<IVideoBufferDRMPRIME*>(buf.videoBuffer);
+ 
+-  if (!buffer)
++  if (!buffer || !buffer->IsValid())
+   {
+     CLog::Log(LOGNOTICE, "CRendererDRMPRIMEGLES::%s - no buffer", __FUNCTION__);
+     return false;
+@@ -139,28 +153,44 @@ bool CRendererDRMPRIMEGLES::RenderHook(i
+   {
+     float x, y, z;
+     float u1, v1;
+-  } vertex[4];
++  };
++
++  std::array<PackedVertex, 4> vertex;
+ 
+   GLint vertLoc = renderSystem->GUIShaderGetPos();
+   GLint loc = renderSystem->GUIShaderGetCoord0();
+ 
+-  for (unsigned int i = 0; i < 4; i++)
+-  {
+-    // Setup vertex position values
+-    vertex[i].x = m_rotatedDestCoords[i].x;
+-    vertex[i].y = m_rotatedDestCoords[i].y;
+-    vertex[i].z = 0.0f;
+-  }
+-
+-  // Setup texture coordinates
+-  vertex[0].u1 = vertex[3].u1 = plane.rect.x1;
+-  vertex[0].v1 = vertex[1].v1 = plane.rect.y1;
+-  vertex[1].u1 = vertex[2].u1 = plane.rect.x2;
+-  vertex[2].v1 = vertex[3].v1 = plane.rect.y2;
++  // top left
++  vertex[0].x = m_rotatedDestCoords[0].x;
++  vertex[0].y = m_rotatedDestCoords[0].y;
++  vertex[0].z = 0.0f;
++  vertex[0].u1 = plane.rect.x1;
++  vertex[0].v1 = plane.rect.y1;
++
++  // top right
++  vertex[1].x = m_rotatedDestCoords[1].x;
++  vertex[1].y = m_rotatedDestCoords[1].y;
++  vertex[1].z = 0.0f;
++  vertex[1].u1 = plane.rect.x2;
++  vertex[1].v1 = plane.rect.y1;
++
++  // bottom right
++  vertex[2].x = m_rotatedDestCoords[2].x;
++  vertex[2].y = m_rotatedDestCoords[2].y;
++  vertex[2].z = 0.0f;
++  vertex[2].u1 = plane.rect.x2;
++  vertex[2].v1 = plane.rect.y2;
++
++  // bottom left
++  vertex[3].x = m_rotatedDestCoords[3].x;
++  vertex[3].y = m_rotatedDestCoords[3].y;
++  vertex[3].z = 0.0f;
++  vertex[3].u1 = plane.rect.x1;
++  vertex[3].v1 = plane.rect.y2;;
+ 
+   glGenBuffers(1, &vertexVBO);
+   glBindBuffer(GL_ARRAY_BUFFER, vertexVBO);
+-  glBufferData(GL_ARRAY_BUFFER, sizeof(PackedVertex)*4, &vertex[0], GL_STATIC_DRAW);
++  glBufferData(GL_ARRAY_BUFFER, sizeof(PackedVertex) * vertex.size(), vertex.data(), GL_STATIC_DRAW);
+ 
+   glVertexAttribPointer(vertLoc, 3, GL_FLOAT, 0, sizeof(PackedVertex), reinterpret_cast<const GLvoid*>(offsetof(PackedVertex, x)));
+   glVertexAttribPointer(loc, 2, GL_FLOAT, 0, sizeof(PackedVertex), reinterpret_cast<const GLvoid*>(offsetof(PackedVertex, u1)));
+@@ -170,7 +200,7 @@ bool CRendererDRMPRIMEGLES::RenderHook(i
+ 
+   glGenBuffers(1, &indexVBO);
+   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexVBO);
+-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLubyte)*4, idx, GL_STATIC_DRAW);
++  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(GLubyte) * 4, idx, GL_STATIC_DRAW);
+ 
+   glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, 0);
+ 
+@@ -188,3 +218,34 @@ bool CRendererDRMPRIMEGLES::RenderHook(i
+ 
+   return true;
+ }
++
++void CRendererDRMPRIMEGLES::AfterRenderHook(int index)
++{
++  m_fences[index]->CreateFence();
++}
++
++bool CRendererDRMPRIMEGLES::Supports(ERENDERFEATURE feature)
++{
++  switch (feature)
++  {
++  case RENDERFEATURE_STRETCH:
++  case RENDERFEATURE_ZOOM:
++  case RENDERFEATURE_VERTICAL_SHIFT:
++  case RENDERFEATURE_PIXEL_RATIO:
++  case RENDERFEATURE_ROTATION:
++    return true;
++  default:
++    return false;
++  }
++}
++
++bool CRendererDRMPRIMEGLES::Supports(ESCALINGMETHOD method)
++{
++  switch (method)
++  {
++  case VS_SCALINGMETHOD_LINEAR:
++    return true;
++  default:
++    return false;
++  }
++}
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.h kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.h	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/RendererDRMPRIMEGLES.h	2019-06-20 03:23:56.000000000 +0300
+@@ -11,6 +11,20 @@
+ #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
+ #include "DRMPRIMEEGL.h"
+ 
++#include <array>
++#include <memory>
++
++namespace KODI
++{
++namespace UTILS
++{
++namespace EGL
++{
++class CEGLFence;
++}
++}
++}
++
+ class CRendererDRMPRIMEGLES : public CLinuxRendererGLES
+ {
+ public:
+@@ -24,14 +38,20 @@ public:
+   // CLinuxRendererGLES overrides
+   bool Configure(const VideoPicture &picture, float fps, unsigned int orientation) override;
+   void ReleaseBuffer(int index) override;
++  bool NeedBuffer(int index) override;
++
++  bool Supports(ERENDERFEATURE feature) override;
++  bool Supports(ESCALINGMETHOD method) override;
+ 
+ protected:
+   // CLinuxRendererGLES overrides
+   bool LoadShadersHook() override;
+   bool RenderHook(int index) override;
++  void AfterRenderHook(int index) override;
+   bool UploadTexture(int index) override;
+   void DeleteTexture(int index) override;
+   bool CreateTexture(int index) override;
+ 
++  std::array<std::unique_ptr<KODI::UTILS::EGL::CEGLFence>, NUM_BUFFERS> m_fences;
+   CDRMPRIMETexture m_DRMPRIMETextures[NUM_BUFFERS];
+ };
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -8,7 +8,7 @@
+ 
+ #include "VideoLayerBridgeDRMPRIME.h"
+ 
+-#include "cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecDRMPRIME.h"
++#include "cores/VideoPlayer/Process/gbm/VideoBufferDRMPRIME.h"
+ #include "utils/log.h"
+ #include "windowing/gbm/DRMUtils.h"
+ 
+@@ -33,7 +33,7 @@ void CVideoLayerBridgeDRMPRIME::Disable(
+   m_DRM->AddProperty(plane, "CRTC_ID", 0);
+ }
+ 
+-void CVideoLayerBridgeDRMPRIME::Acquire(CVideoBufferDRMPRIME* buffer)
++void CVideoLayerBridgeDRMPRIME::Acquire(IVideoBufferDRMPRIME* buffer)
+ {
+   // release the buffer that is no longer presented on screen
+   Release(m_prev_buffer);
+@@ -46,7 +46,7 @@ void CVideoLayerBridgeDRMPRIME::Acquire(
+   m_buffer->Acquire();
+ }
+ 
+-void CVideoLayerBridgeDRMPRIME::Release(CVideoBufferDRMPRIME* buffer)
++void CVideoLayerBridgeDRMPRIME::Release(IVideoBufferDRMPRIME* buffer)
+ {
+   if (!buffer)
+     return;
+@@ -55,11 +55,14 @@ void CVideoLayerBridgeDRMPRIME::Release(
+   buffer->Release();
+ }
+ 
+-bool CVideoLayerBridgeDRMPRIME::Map(CVideoBufferDRMPRIME* buffer)
++bool CVideoLayerBridgeDRMPRIME::Map(IVideoBufferDRMPRIME* buffer)
+ {
+   if (buffer->m_fb_id)
+     return true;
+ 
++  if (!buffer->Map())
++    return false;
++
+   AVDRMFrameDescriptor* descriptor = buffer->GetDescriptor();
+   uint32_t handles[4] = {0}, pitches[4] = {0}, offsets[4] = {0}, flags = 0;
+   uint64_t modifier[4] = {0};
+@@ -108,7 +111,7 @@ bool CVideoLayerBridgeDRMPRIME::Map(CVid
+   return true;
+ }
+ 
+-void CVideoLayerBridgeDRMPRIME::Unmap(CVideoBufferDRMPRIME* buffer)
++void CVideoLayerBridgeDRMPRIME::Unmap(IVideoBufferDRMPRIME* buffer)
+ {
+   if (buffer->m_fb_id)
+   {
+@@ -125,9 +128,11 @@ void CVideoLayerBridgeDRMPRIME::Unmap(CV
+       buffer->m_handles[i] = 0;
+     }
+   }
++
++  buffer->Unmap();
+ }
+ 
+-void CVideoLayerBridgeDRMPRIME::Configure(CVideoBufferDRMPRIME* buffer)
++void CVideoLayerBridgeDRMPRIME::Configure(IVideoBufferDRMPRIME* buffer)
+ {
+   struct plane* plane = m_DRM->GetVideoPlane();
+   if (m_DRM->SupportsProperty(plane, "COLOR_ENCODING") &&
+@@ -138,7 +143,7 @@ void CVideoLayerBridgeDRMPRIME::Configur
+   }
+ }
+ 
+-void CVideoLayerBridgeDRMPRIME::SetVideoPlane(CVideoBufferDRMPRIME* buffer, const CRect& destRect)
++void CVideoLayerBridgeDRMPRIME::SetVideoPlane(IVideoBufferDRMPRIME* buffer, const CRect& destRect)
+ {
+   if (!Map(buffer))
+   {
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.h kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.h
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.h	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/HwDecRender/VideoLayerBridgeDRMPRIME.h	2019-06-20 03:23:56.000000000 +0300
+@@ -24,7 +24,7 @@ namespace GBM
+ }
+ }
+ 
+-class CVideoBufferDRMPRIME;
++class IVideoBufferDRMPRIME;
+ 
+ class CVideoLayerBridgeDRMPRIME
+   : public KODI::WINDOWING::GBM::CVideoLayerBridge
+@@ -34,19 +34,19 @@ public:
+   ~CVideoLayerBridgeDRMPRIME();
+   void Disable() override;
+ 
+-  virtual void Configure(CVideoBufferDRMPRIME* buffer);
+-  virtual void SetVideoPlane(CVideoBufferDRMPRIME* buffer, const CRect& destRect);
++  virtual void Configure(IVideoBufferDRMPRIME* buffer);
++  virtual void SetVideoPlane(IVideoBufferDRMPRIME* buffer, const CRect& destRect);
+   virtual void UpdateVideoPlane();
+ 
+ protected:
+   std::shared_ptr<KODI::WINDOWING::GBM::CDRMUtils> m_DRM;
+ 
+ private:
+-  void Acquire(CVideoBufferDRMPRIME* buffer);
+-  void Release(CVideoBufferDRMPRIME* buffer);
+-  bool Map(CVideoBufferDRMPRIME* buffer);
+-  void Unmap(CVideoBufferDRMPRIME* buffer);
++  void Acquire(IVideoBufferDRMPRIME* buffer);
++  void Release(IVideoBufferDRMPRIME* buffer);
++  bool Map(IVideoBufferDRMPRIME* buffer);
++  void Unmap(IVideoBufferDRMPRIME* buffer);
+ 
+-  CVideoBufferDRMPRIME* m_buffer = nullptr;
+-  CVideoBufferDRMPRIME* m_prev_buffer = nullptr;
++  IVideoBufferDRMPRIME* m_buffer = nullptr;
++  IVideoBufferDRMPRIME* m_prev_buffer = nullptr;
+ };
+diff -ruNp kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp
+--- kodi-0186c4b/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp	2019-06-27 23:51:12.127160652 +0300
++++ kodi-418c88a/xbmc/cores/VideoPlayer/VideoRenderers/RenderManager.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -224,7 +224,7 @@ bool CRenderManager::Configure()
+     m_lateframes = -1;
+     m_presentevent.notifyAll();
+     m_renderedOverlay = false;
+-    m_QueueSkip = 0;
++    m_renderDebug = false;
+     m_clockSync.Reset();
+     m_dvdClock.SetVsyncAdjust(0);
+     m_overlays.SetStereoMode(m_stereomode);
+@@ -1056,8 +1056,7 @@ int CRenderManager::WaitForBuffer(volati
+   XbmcThreads::EndTime endtime(timeout);
+   while(m_free.empty())
+   {
+-    CLog::Log(LOGDEBUG, LOGAVTIMING, "CRenderManager::WaitForBuffer - timeout:%d",std::min(20, timeout));
+-    m_presentevent.wait(lock, std::min(20, timeout));
++    m_presentevent.wait(lock, std::min(50, timeout));
+     if (endtime.IsTimePast() || bStop)
+     {
+       if (timeout != 0 && !bStop)
+@@ -1121,7 +1120,7 @@ void CRenderManager::PrepareNextRender()
+   }
+ 
+   CLog::LogF(LOGDEBUG, LOGAVTIMING, "frameOnScreen: %0.3f renderPts: %0.3f nextFramePts: %0.3f -> diff: %0.3f  render: %u forceNext: %u",
+-    frameOnScreen / DVD_TIME_BASE, renderPts / DVD_TIME_BASE, nextFramePts / DVD_TIME_BASE, (renderPts - nextFramePts) / DVD_TIME_BASE, renderPts >= nextFramePts, m_forceNext);
++	 frameOnScreen / DVD_TIME_BASE, renderPts / DVD_TIME_BASE, nextFramePts / DVD_TIME_BASE, (renderPts - nextFramePts) / DVD_TIME_BASE, renderPts >= nextFramePts, m_forceNext);
+ 
+   bool combined = false;
+   if (m_presentsourcePast >= 0)
+@@ -1136,20 +1135,20 @@ void CRenderManager::PrepareNextRender()
+     // see if any future queued frames are already due
+     auto iter = m_queued.begin();
+     int idx = *iter;
+-    ++iter;
++    int lateframes = 0;
++    int queue_size = m_queued.size();
++
+     while (iter != m_queued.end())
+     {
+       // the slot for rendering in time is [pts .. (pts +  x * frametime)]
+       // renderer/drivers have internal queues, being slightly late here does not mean that
+       // we are really late. The likelihood that we recover decreases the greater m_lateframes
+       // get. Skipping a frame is easier than having decoder dropping one (lateframes > 10)
+-      double x = (m_lateframes <= 6) ? 1.99 : 0;
+-      if (renderPts < m_Queue[*iter].pts + x * frametime)
++      double x = (m_lateframes <= 6) ? 0.98 : 0;
++      if ((renderPts - frametime * queue_size) < (m_Queue[*iter].pts + x * frametime))
+         break;
+-      m_QueueSkip++;
+-      CLog::Log(LOGDEBUG, "CRenderManager::PrepareNextRender  Frame Skip:%d iter.pts:%0.3f lf:%d latency:%0.3f Clock:%0.3f", m_QueueSkip,
+-        m_Queue[*iter].pts / DVD_TIME_BASE, static_cast<int>((renderPts - m_Queue[*iter].pts) * m_fps / DVD_TIME_BASE),
+-        m_displayLatency / DVD_TIME_BASE, m_dvdClock.GetClock() / DVD_TIME_BASE);
++      lateframes++;
++      queue_size--;
+       idx = *iter;
+       ++iter;
+     }
+@@ -1163,11 +1162,11 @@ void CRenderManager::PrepareNextRender()
+       if (m_presentsourcePast >= 0)
+       {
+         m_discard.push_back(m_presentsourcePast);
++        m_QueueSkip++;
+         m_presentsourcePast = -1;
+       }
+     }
+ 
+-    int lateframes = static_cast<int>((renderPts - m_Queue[idx].pts) * m_fps / DVD_TIME_BASE);
+     if (lateframes)
+       m_lateframes += lateframes;
+     else
+@@ -1242,7 +1241,7 @@ void CRenderManager::CheckEnableClockSyn
+     diff = std::abs(std::round(diff) - diff);
+   }
+ 
+-  if (diff < 0.0005)
++  if (diff && diff < 0.0005)
+   {
+     m_clockSync.m_enabled = true;
+   }
+diff -ruNp kodi-0186c4b/xbmc/settings/Settings.cpp kodi-418c88a/xbmc/settings/Settings.cpp
+--- kodi-0186c4b/xbmc/settings/Settings.cpp	2019-06-27 23:51:11.863158450 +0300
++++ kodi-418c88a/xbmc/settings/Settings.cpp	2019-06-21 00:54:59.033849991 +0300
+@@ -393,13 +393,8 @@ const std::string CSettings::SETTING_EVE
+ const std::string CSettings::SETTING_MASTERLOCK_LOCKCODE = "masterlock.lockcode";
+ const std::string CSettings::SETTING_MASTERLOCK_STARTUPLOCK = "masterlock.startuplock";
+ const std::string CSettings::SETTING_MASTERLOCK_MAXRETRIES = "masterlock.maxretries";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_DEINTERLACING = "coreelec.amlogic.deinterlacing";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_NOISEREDUCTION = "coreelec.amlogic.noisereduction";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_LIMIT8BIT = "coreelec.amlogic.limit8bit";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_FORCE422 = "coreelec.amlogic.force422";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_HEVCWORKAROUND = "coreelec.amlogic.hevcworkaround";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_MUTEHDMIAUDIO = "coreelec.amlogic.mutehdmiaudio";
+-const std::string CSettings::SETTING_COREELEC_AMLOGIC_MAXGPUCLOCK = "coreelec.amlogic.maxgpuclock";
++const std::string CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR = "coreelec.amlogic.sdr2hdr";
++const std::string CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR = "coreelec.amlogic.hdr2sdr";
+ const std::string CSettings::SETTING_CACHE_HARDDISK = "cache.harddisk";
+ const std::string CSettings::SETTING_CACHEVIDEO_DVDROM = "cachevideo.dvdrom";
+ const std::string CSettings::SETTING_CACHEVIDEO_LAN = "cachevideo.lan";
+diff -ruNp kodi-0186c4b/xbmc/settings/Settings.h kodi-418c88a/xbmc/settings/Settings.h
+--- kodi-0186c4b/xbmc/settings/Settings.h	2019-06-27 23:51:11.863158450 +0300
++++ kodi-418c88a/xbmc/settings/Settings.h	2019-06-21 00:54:59.033849991 +0300
+@@ -353,13 +353,8 @@ public:
+   static const std::string SETTING_MASTERLOCK_LOCKCODE;
+   static const std::string SETTING_MASTERLOCK_STARTUPLOCK;
+   static const std::string SETTING_MASTERLOCK_MAXRETRIES;
+-  static const std::string SETTING_COREELEC_AMLOGIC_DEINTERLACING;
+-  static const std::string SETTING_COREELEC_AMLOGIC_NOISEREDUCTION;
+-  static const std::string SETTING_COREELEC_AMLOGIC_LIMIT8BIT;
+-  static const std::string SETTING_COREELEC_AMLOGIC_FORCE422;
+-  static const std::string SETTING_COREELEC_AMLOGIC_HEVCWORKAROUND;
+-  static const std::string SETTING_COREELEC_AMLOGIC_MUTEHDMIAUDIO;
+-  static const std::string SETTING_COREELEC_AMLOGIC_MAXGPUCLOCK;
++  static const std::string SETTING_COREELEC_AMLOGIC_SDR2HDR;
++  static const std::string SETTING_COREELEC_AMLOGIC_HDR2SDR;
+   static const std::string SETTING_CACHE_HARDDISK;
+   static const std::string SETTING_CACHEVIDEO_DVDROM;
+   static const std::string SETTING_CACHEVIDEO_LAN;
+diff -ruNp kodi-0186c4b/xbmc/utils/ActorProtocol.cpp kodi-418c88a/xbmc/utils/ActorProtocol.cpp
+--- kodi-0186c4b/xbmc/utils/ActorProtocol.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/utils/ActorProtocol.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -28,7 +28,7 @@ void Message::Release()
+   if (data != buffer)
+     delete [] data;
+ 
+-  payloadObj.release();
++  payloadObj.reset();
+ 
+   // delete event in case of sync message
+   delete event;
+diff -ruNp kodi-0186c4b/xbmc/utils/AMLUtils.cpp kodi-418c88a/xbmc/utils/AMLUtils.cpp
+--- kodi-0186c4b/xbmc/utils/AMLUtils.cpp	2019-06-27 23:51:12.231161520 +0300
++++ kodi-418c88a/xbmc/utils/AMLUtils.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -101,11 +101,6 @@ bool aml_permissions()
+       CLog::Log(LOGERROR, "AML: no rw on /dev/video10");
+       permissions_ok = 0;
+     }
+-    if (!SysfsUtils::HasRW("/sys/module/amlvideodri/parameters/freerun_mode"))
+-    {
+-      CLog::Log(LOGERROR, "AML: no rw on /sys/module/amlvideodri/parameters/freerun_mode");
+-      permissions_ok = 0;
+-    }
+     if (!SysfsUtils::HasRW("/sys/class/video/freerun_mode"))
+     {
+       CLog::Log(LOGERROR, "AML: no rw on /sys/class/video/freerun_mode");
+@@ -143,10 +138,6 @@ bool aml_permissions()
+     {
+       CLog::Log(LOGERROR, "AML: no rw on /sys/class/amhdmitx/amhdmitx0/frac_rate_policy");
+     }
+-    if (!SysfsUtils::HasRW("/sys/module/di/parameters/bypass_prog"))
+-    {
+-      CLog::Log(LOGERROR, "AML: no rw on /sys/module/di/parameters/bypass_prog");
+-    }
+     if (!SysfsUtils::HasRW("/sys/class/display/mode"))
+     {
+       CLog::Log(LOGERROR, "AML: no rw on /sys/class/display/mode");
+@@ -372,8 +363,8 @@ bool aml_mode_to_resolution(const char *
+   }
+   else if (StringUtils::EqualsNoCase(fromMode, "4k2ksmpte") || StringUtils::EqualsNoCase(fromMode, "smpte24hz"))
+   {
+-    res->iWidth = 1920;
+-    res->iHeight= 1080;
++    res->iWidth = 4096;
++    res->iHeight= 2160;
+     res->iScreenWidth = 4096;
+     res->iScreenHeight= 2160;
+     res->fRefreshRate = 24;
+@@ -424,8 +415,8 @@ bool aml_mode_to_resolution(const char *
+       return false;
+     }
+ 
+-    res->iWidth = (width < 3840) ? width : 1920;
+-    res->iHeight= (height < 2160) ? height : 1080;
++    res->iWidth = width;
++    res->iHeight= height;
+     res->iScreenWidth = width;
+     res->iScreenHeight = height;
+     res->dwFlags = (smode == 'p') ? D3DPRESENTFLAG_PROGRESSIVE : D3DPRESENTFLAG_INTERLACED;
+@@ -485,13 +476,16 @@ bool aml_set_native_resolution(const RES
+ 
+ bool aml_probe_resolutions(std::vector<RESOLUTION_INFO> &resolutions)
+ {
+-  std::string valstr, dcapfile;
++  std::string valstr, vesastr, dcapfile;
+   dcapfile = CSpecialProtocol::TranslatePath("special://home/userdata/disp_cap");
+ 
+   if (SysfsUtils::GetString(dcapfile, valstr) < 0)
+   {
+     if (SysfsUtils::GetString("/sys/class/amhdmitx/amhdmitx0/disp_cap", valstr) < 0)
+       return false;
++
++    if (SysfsUtils::GetString("/sys/class/amhdmitx/amhdmitx0/vesa_cap", vesastr) == 0)
++      valstr += "\n" + vesastr;
+   }
+   std::vector<std::string> probe_str = StringUtils::Split(valstr, "\n");
+ 
+@@ -676,8 +670,8 @@ void aml_set_framebuffer_resolution(int
+     {
+       vinfo.xres = width;
+       vinfo.yres = height;
+-      vinfo.xres_virtual = 1920;
+-      vinfo.yres_virtual = 2160;
++      vinfo.xres_virtual = width;
++      vinfo.yres_virtual = height * 2;
+       vinfo.bits_per_pixel = 32;
+       vinfo.activate = FB_ACTIVATE_ALL;
+       ioctl(fd0, FBIOPUT_VSCREENINFO, &vinfo);
+@@ -725,14 +719,8 @@ bool aml_read_reg(const std::string &reg
+ 
+ bool aml_has_capability_ignore_alpha()
+ {
+-  // AML is at least GXBB
+-  uint32_t reg_val;
+-  if (aml_read_reg("c8100220", reg_val))
+-  {
+-    if ((reg_val >> 24) >= 0x1f)
+-      return true;
+-  }
+-  return false;
++  // 4.9 seg faults on access to /sys/kernel/debug/aml_reg/paddr and since we are CE it's always AML
++  return true;
+ }
+ 
+ bool aml_set_reg_ignore_alpha()
+diff -ruNp kodi-0186c4b/xbmc/utils/CMakeLists.txt kodi-418c88a/xbmc/utils/CMakeLists.txt
+--- kodi-0186c4b/xbmc/utils/CMakeLists.txt	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/utils/CMakeLists.txt	2019-06-20 03:23:56.000000000 +0300
+@@ -169,8 +169,10 @@ if(XSLT_FOUND)
+   list(APPEND HEADERS XSLTUtils.h)
+ endif()
+ if(EGL_FOUND)
+-  list(APPEND SOURCES EGLUtils.cpp)
+-  list(APPEND HEADERS EGLUtils.h)
++  list(APPEND SOURCES EGLUtils.cpp
++                      EGLFence.cpp)
++  list(APPEND HEADERS EGLUtils.h
++                      EGLFence.h)
+ endif()
+ 
+ # The large map trips the clang optimizer
+diff -ruNp kodi-0186c4b/xbmc/utils/CPUInfo.cpp kodi-418c88a/xbmc/utils/CPUInfo.cpp
+--- kodi-0186c4b/xbmc/utils/CPUInfo.cpp	2019-06-27 23:51:12.119160586 +0300
++++ kodi-418c88a/xbmc/utils/CPUInfo.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -265,9 +265,18 @@ CCPUInfo::CCPUInfo(void)
+   }
+ #else
+   m_fProcStat = fopen("/proc/stat", "r");
+-  m_fProcTemperature = fopen("/sys/class/thermal/thermal_zone0/temp", "r");  // On Amlogic
++  m_fProcTemperature = fopen("/proc/acpi/thermal_zone/THM0/temperature", "r");
+   if (m_fProcTemperature == NULL)
+-    m_fProcTemperature = fopen("/sys/class/thermal/thermal_zone1/temp", "r");
++    m_fProcTemperature = fopen("/proc/acpi/thermal_zone/THRM/temperature", "r");
++  if (m_fProcTemperature == NULL)
++    m_fProcTemperature = fopen("/proc/acpi/thermal_zone/THR0/temperature", "r");
++  if (m_fProcTemperature == NULL)
++    m_fProcTemperature = fopen("/proc/acpi/thermal_zone/TZ0/temperature", "r");
++  // read from the new location of the temperature data on new kernels, 2.6.39, 3.0 etc
++  if (m_fProcTemperature == NULL)
++    m_fProcTemperature = fopen("/sys/class/hwmon/hwmon0/temp1_input", "r");
++  if (m_fProcTemperature == NULL)
++    m_fProcTemperature = fopen("/sys/class/thermal/thermal_zone0/temp", "r");  // On Raspberry PIs
+ 
+   m_fCPUFreq = fopen ("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "r");
+   if (!m_fCPUFreq)
+diff -ruNp kodi-0186c4b/xbmc/utils/EGLFence.cpp kodi-418c88a/xbmc/utils/EGLFence.cpp
+--- kodi-0186c4b/xbmc/utils/EGLFence.cpp	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/utils/EGLFence.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,69 @@
++/*
++ *  Copyright (C) 2017-2018 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#include "EGLFence.h"
++
++#include "EGLUtils.h"
++
++using namespace KODI::UTILS::EGL;
++
++CEGLFence::CEGLFence(EGLDisplay display) :
++  m_display(display)
++{
++  m_eglCreateSyncKHR = CEGLUtils::GetRequiredProcAddress<PFNEGLCREATESYNCKHRPROC>("eglCreateSyncKHR");
++  m_eglDestroySyncKHR = CEGLUtils::GetRequiredProcAddress<PFNEGLDESTROYSYNCKHRPROC>("eglDestroySyncKHR");
++  m_eglGetSyncAttribKHR = CEGLUtils::GetRequiredProcAddress<PFNEGLGETSYNCATTRIBKHRPROC>("eglGetSyncAttribKHR");
++}
++
++void CEGLFence::CreateFence()
++{
++  m_fence = m_eglCreateSyncKHR(m_display, EGL_SYNC_FENCE_KHR, nullptr);
++  if (m_fence == EGL_NO_SYNC_KHR)
++  {
++    CEGLUtils::LogError("failed to create egl sync fence");
++    throw std::runtime_error("failed to create egl sync fence");
++  }
++}
++
++void CEGLFence::DestroyFence()
++{
++  if (m_fence == EGL_NO_SYNC_KHR)
++  {
++    return;
++  }
++
++  if (m_eglDestroySyncKHR(m_display, m_fence) != EGL_TRUE)
++  {
++    CEGLUtils::LogError("failed to destroy egl sync fence");
++  }
++
++  m_fence = EGL_NO_SYNC_KHR;
++}
++
++bool CEGLFence::IsSignaled()
++{
++  // fence has been destroyed so return true immediately so buffer can be used
++  if (m_fence == EGL_NO_SYNC_KHR)
++  {
++    return true;
++  }
++
++  EGLint status = EGL_UNSIGNALED_KHR;
++  if (m_eglGetSyncAttribKHR(m_display, m_fence, EGL_SYNC_STATUS_KHR, &status) != EGL_TRUE)
++  {
++    CEGLUtils::LogError("failed to query egl sync fence");
++    return false;
++  }
++
++  if (status == EGL_SIGNALED_KHR)
++  {
++    return true;
++  }
++
++  return false;
++}
+diff -ruNp kodi-0186c4b/xbmc/utils/EGLFence.h kodi-418c88a/xbmc/utils/EGLFence.h
+--- kodi-0186c4b/xbmc/utils/EGLFence.h	1970-01-01 03:00:00.000000000 +0300
++++ kodi-418c88a/xbmc/utils/EGLFence.h	2019-06-20 03:23:56.000000000 +0300
+@@ -0,0 +1,43 @@
++/*
++ *  Copyright (C) 2017-2018 Team Kodi
++ *  This file is part of Kodi - https://kodi.tv
++ *
++ *  SPDX-License-Identifier: GPL-2.0-or-later
++ *  See LICENSES/README.md for more information.
++ */
++
++#pragma once
++
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++
++namespace KODI
++{
++namespace UTILS
++{
++namespace EGL
++{
++
++class CEGLFence
++{
++public:
++  explicit CEGLFence(EGLDisplay display);
++  CEGLFence(CEGLFence const& other) = delete;
++  CEGLFence& operator=(CEGLFence const& other) = delete;
++
++  void CreateFence();
++  void DestroyFence();
++  bool IsSignaled();
++
++private:
++  EGLDisplay m_display{nullptr};
++  EGLSyncKHR m_fence{nullptr};
++
++  PFNEGLCREATESYNCKHRPROC m_eglCreateSyncKHR{nullptr};
++  PFNEGLDESTROYSYNCKHRPROC m_eglDestroySyncKHR{nullptr};
++  PFNEGLGETSYNCATTRIBKHRPROC m_eglGetSyncAttribKHR{nullptr};
++};
++
++}
++}
++}
+diff -ruNp kodi-0186c4b/xbmc/windowing/amlogic/WinSystemAmlogic.cpp kodi-418c88a/xbmc/windowing/amlogic/WinSystemAmlogic.cpp
+--- kodi-0186c4b/xbmc/windowing/amlogic/WinSystemAmlogic.cpp	2019-06-27 23:51:11.847158316 +0300
++++ kodi-418c88a/xbmc/windowing/amlogic/WinSystemAmlogic.cpp	2019-06-21 00:54:58.973849405 +0300
+@@ -84,50 +84,20 @@ CWinSystemAmlogic::~CWinSystemAmlogic()
+ 
+ bool CWinSystemAmlogic::InitWindowSystem()
+ {
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_NOISEREDUCTION))
+-  {
+-     CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- disabling noise reduction");
+-     SysfsUtils::SetString("/sys/module/di/parameters/nr2_en", "0");
+-  }
+-
+-  std::string attr = "";
+-  SysfsUtils::GetString("/sys/class/amhdmitx/amhdmitx0/attr", attr);
+-  //We delay writing attr until everything is done with it to avoid multiple display resets.
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_FORCE422))
+-  {
+-     CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- Setting 422 output");
+-     if (attr.find("444") != std::string::npos ||
+-         attr.find("422") != std::string::npos ||
+-         attr.find("420") != std::string::npos)
+-       attr.replace(attr.find("4"),3,"422");
+-     else
+-       attr.append("422");
+-  }
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_LIMIT8BIT))
+-  {
+-     CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- Limiting display to 8bit colour depth");
+-     if (attr.find("10bit") != std::string::npos)
+-       attr.replace(attr.find("10bit"),5,"8bit");
+-     else
+-       attr.append("8bit");
+-  }
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_LIMIT8BIT) ||
+-      CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_FORCE422))
+-  {
+-     //attr.append("now");
+-     SysfsUtils::SetString("/sys/class/amhdmitx/amhdmitx0/attr", attr.c_str());
+-  }
++  const std::shared_ptr<CSettings> settings = CServiceBroker::GetSettingsComponent()->GetSettings();
+ 
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_MUTEHDMIAUDIO))
++  int sdr2hdr = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_SDR2HDR);
++  if (sdr2hdr != 0) // Default is Off (0)
+   {
+-     CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- muting hdmi audio");
+-     SysfsUtils::SetString("/sys/class/amhdmitx/amhdmitx0/config", "audio_off");
++    CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- setting sdr2hdr mode to %d", sdr2hdr);
++    SysfsUtils::SetInt("/sys/module/am_vecm/parameters/sdr_mode", sdr2hdr);
+   }
+ 
+-  if (CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(CSettings::SETTING_COREELEC_AMLOGIC_MAXGPUCLOCK))
++  int hdr2sdr = settings->GetInt(CSettings::SETTING_COREELEC_AMLOGIC_HDR2SDR);
++  if (hdr2sdr != 2) // Default is Auto (2)
+   {
+-     CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- increasing GPU clock rate");
+-     SysfsUtils::SetString("/sys/class/mpgpu/scale_mode", "2");
++    CLog::Log(LOGDEBUG, "CWinSystemAmlogic::InitWindowSystem -- setting hdr2sdr mode to %d", hdr2sdr);
++    SysfsUtils::SetInt("/sys/module/am_vecm/parameters/hdr_mode", hdr2sdr);
+   }
+ 
+   m_nativeDisplay = EGL_DEFAULT_DISPLAY;
+diff -ruNp kodi-0186c4b/xbmc/windowing/gbm/DRMUtils.cpp kodi-418c88a/xbmc/windowing/gbm/DRMUtils.cpp
+--- kodi-0186c4b/xbmc/windowing/gbm/DRMUtils.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/windowing/gbm/DRMUtils.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -109,27 +109,43 @@ drm_fb * CDRMUtils::DrmFbGetFromBo(struc
+   memset(offsets, 0, 16);
+ #endif
+ 
+-  if (modifiers[0] == DRM_FORMAT_MOD_INVALID)
+-    modifiers[0] = DRM_FORMAT_MOD_LINEAR;
++  uint32_t flags = 0;
+ 
+-  CLog::Log(LOGDEBUG, "CDRMUtils::%s - using modifier: %lli", __FUNCTION__, modifiers[0]);
++  if (modifiers[0] && modifiers[0] != DRM_FORMAT_MOD_INVALID)
++  {
++    flags |= DRM_MODE_FB_MODIFIERS;
++    CLog::Log(LOGDEBUG, "CDRMUtils::{} - using modifier: {:#x}", __FUNCTION__, modifiers[0]);
++  }
+ 
+-  auto ret = drmModeAddFB2WithModifiers(m_fd,
+-                                        width,
+-                                        height,
+-                                        fb->format,
+-                                        handles,
+-                                        strides,
+-                                        offsets,
+-                                        modifiers,
+-                                        &fb->fb_id,
+-                                        (modifiers[0] > 0) ? DRM_MODE_FB_MODIFIERS : 0);
+-
+-  if(ret)
+-  {
+-    delete (fb);
+-    CLog::Log(LOGDEBUG, "CDRMUtils::%s - failed to add framebuffer", __FUNCTION__);
+-    return nullptr;
++  int ret = drmModeAddFB2WithModifiers(m_fd,
++                                       width,
++                                       height,
++                                       fb->format,
++                                       handles,
++                                       strides,
++                                       offsets,
++                                       modifiers,
++                                       &fb->fb_id,
++                                       flags);
++
++  if(ret < 0)
++  {
++    ret = drmModeAddFB2(m_fd,
++                        width,
++                        height,
++                        fb->format,
++                        handles,
++                        strides,
++                        offsets,
++                        &fb->fb_id,
++                        flags);
++
++    if (ret < 0)
++    {
++      delete (fb);
++      CLog::Log(LOGDEBUG, "CDRMUtils::{} - failed to add framebuffer: {} ({})", __FUNCTION__, strerror(errno), errno);
++      return nullptr;
++    }
+   }
+ 
+   gbm_bo_set_user_data(bo, fb, DrmFbDestroyCallback);
+@@ -579,10 +595,26 @@ bool CDRMUtils::InitDrm()
+     auto ret = drmSetClientCap(m_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+     if (ret)
+     {
+-      CLog::Log(LOGERROR, "CDRMUtils::%s - failed to set Universal planes capability: %s", __FUNCTION__, strerror(errno));
++      CLog::Log(LOGERROR, "CDRMUtils::{} - failed to set universal planes capability: {}", __FUNCTION__, strerror(errno));
++      return false;
++    }
++
++    ret = drmSetClientCap(m_fd, DRM_CLIENT_CAP_STEREO_3D, 1);
++    if (ret)
++    {
++      CLog::Log(LOGERROR, "CDRMUtils::{} - failed to set stereo 3d capability: {}", __FUNCTION__, strerror(errno));
+       return false;
+     }
+ 
++#if defined(DRM_CLIENT_CAP_ASPECT_RATIO)
++    ret = drmSetClientCap(m_fd, DRM_CLIENT_CAP_ASPECT_RATIO, 0);
++    if (ret)
++    {
++      CLog::Log(LOGERROR, "CDRMUtils::{} - failed to unset aspect ratio capability: {}", __FUNCTION__, strerror(errno));
++      return false;
++    }
++#endif
++
+     if(!GetResources())
+     {
+       return false;
+diff -ruNp kodi-0186c4b/xbmc/windowing/gbm/WinSystemGbm.cpp kodi-418c88a/xbmc/windowing/gbm/WinSystemGbm.cpp
+--- kodi-0186c4b/xbmc/windowing/gbm/WinSystemGbm.cpp	2019-06-27 23:51:11.791157849 +0300
++++ kodi-418c88a/xbmc/windowing/gbm/WinSystemGbm.cpp	2019-06-21 00:54:58.973849405 +0300
+@@ -177,11 +177,19 @@ void CWinSystemGbm::FlipPage(bool render
+     m_videoLayerBridge->Disable();
+   }
+ 
+-  struct gbm_bo *bo = m_GBM->LockFrontBuffer();
++  struct gbm_bo *bo = nullptr;
++
++  if (rendered)
++  {
++    bo = m_GBM->LockFrontBuffer();
++  }
+ 
+   m_DRM->FlipPage(bo, rendered, videoLayer);
+ 
+-  m_GBM->ReleaseBuffer();
++  if (rendered)
++  {
++    m_GBM->ReleaseBuffer();
++  }
+ 
+   if (m_videoLayerBridge && !videoLayer)
+   {
+diff -ruNp kodi-0186c4b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp kodi-418c88a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp
+--- kodi-0186c4b/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp	2019-06-11 11:59:25.000000000 +0300
++++ kodi-418c88a/xbmc/windowing/gbm/WinSystemGbmGLESContext.cpp	2019-06-20 03:23:56.000000000 +0300
+@@ -14,6 +14,7 @@
+ #include "cores/RetroPlayer/rendering/VideoRenderers/RPRendererGBM.h"
+ #include "cores/RetroPlayer/rendering/VideoRenderers/RPRendererOpenGLES.h"
+ #include "cores/VideoPlayer/DVDCodecs/DVDFactoryCodec.h"
++#include "cores/VideoPlayer/Process/gbm/ProcessInfoGBM.h"
+ #include "cores/VideoPlayer/VideoRenderers/LinuxRendererGLES.h"
+ #include "cores/VideoPlayer/VideoRenderers/RenderFactory.h"
+ 
+@@ -65,6 +66,7 @@ bool CWinSystemGbmGLESContext::InitWindo
+   CRendererDRMPRIMEGLES::Register();
+   CRendererDRMPRIME::Register();
+   CDVDVideoCodecDRMPRIME::Register();
++  VIDEOPLAYER::CProcessInfoGBM::Register();
+ 
+   return true;
+ }
+diff -ruNp kodi-0186c4b/xbmc/windows/GUIWindowSystemInfo.cpp kodi-418c88a/xbmc/windows/GUIWindowSystemInfo.cpp
+--- kodi-0186c4b/xbmc/windows/GUIWindowSystemInfo.cpp	2019-06-27 23:51:12.119160586 +0300
++++ kodi-418c88a/xbmc/windows/GUIWindowSystemInfo.cpp	2019-06-21 00:54:59.049850147 +0300
+@@ -144,10 +144,21 @@ void CGUIWindowSystemInfo::FrameMove()
+   {
+     SET_CONTROL_LABEL(40,g_localizeStrings.Get(20160));
+     SET_CONTROL_LABEL(i++, g_sysinfo.GetCPUModel());
++#if defined(__arm__) && defined(TARGET_LINUX)
++    SET_CONTROL_LABEL(i++, g_sysinfo.GetCPUBogoMips());
++    if (!g_sysinfo.GetCPUSoC().empty())
++      SET_CONTROL_LABEL(i++, g_sysinfo.GetCPUSoC());
+     SET_CONTROL_LABEL(i++, g_sysinfo.GetCPUHardware());
++    SET_CONTROL_LABEL(i++, g_sysinfo.GetCPURevision());
++    SET_CONTROL_LABEL(i++, g_sysinfo.GetCPUSerial());
++#endif
+     SetControlLabel(i++, "%s %s", 22011, SYSTEM_CPU_TEMPERATURE);
++#if (!defined(__arm__) && !defined(__aarch64__)) || defined(TARGET_RASPBERRY_PI)
+     SetControlLabel(i++, "%s %s", 13284, SYSTEM_CPUFREQUENCY);
++#endif
++#if !(defined(__arm__) && defined(TARGET_LINUX))
+     SetControlLabel(i++, "%s %s", 13271, SYSTEM_CPU_USAGE);
++#endif
+     i++;  // empty line
+     SetControlLabel(i++, "%s: %s", 22012, SYSTEM_TOTAL_MEMORY);
+     SetControlLabel(i++, "%s: %s", 158, SYSTEM_FREE_MEMORY);
+--- kodi-0186c4b/system/settings/settings.xml	2019-06-27 23:51:12.295162054 +0300
++++ kodi-418c88a/system/settings/settings.xml	2019-06-21 00:54:59.109850733 +0300
+@@ -79,7 +79,7 @@
+         </setting>
+         <setting id="videoplayer.stretch43" type="integer" label="173" help="36171">
+           <level>2</level>
+-          <default>4</default> <!-- ViewModeStretch16x9 -->
++          <default>0</default> <!-- ViewModeNormal -->
+           <constraints>
+             <options>
+               <option label="630">0</option> <!-- ViewModeNormal -->
+@@ -248,7 +248,7 @@
+       <group id="5" label="14233">
+         <setting id="videoplayer.teletextenabled" type="boolean" label="23050" help="36174">
+           <level>3</level>
+-          <default>false</default>
++          <default>true</default>
+           <control type="toggle" />
+         </setting>
+         <setting id="videoplayer.teletextscale" type="boolean" parent="videoplayer.teletextenabled" label="23055" help="36175">
+@@ -898,12 +898,12 @@
+         </setting>
+         <setting id="filelists.showhidden" type="boolean" label="21330" help="36127">
+           <level>2</level>
+-          <default>true</default>
++          <default>false</default>
+           <control type="toggle" />
+         </setting>
+         <setting id="filelists.allowfiledeletion" type="boolean" label="14071" help="36125">
+           <level>2</level>
+-          <default>true</default>
++          <default>false</default>
+           <dependencies>
+             <dependency type="enable">
+               <or>
+@@ -1331,7 +1331,7 @@
+       <group id="1" label="128">
+         <setting id="epg.pastdaystodisplay" type="integer" label="19229" help="36219">
+           <level>2</level>
+-          <default>0</default>
++          <default>1</default>
+           <constraints>
+             <minimum>0</minimum>
+             <step>1</step>
+@@ -1343,7 +1343,7 @@
+         </setting>
+         <setting id="epg.futuredaystodisplay" type="integer" label="19182" help="36220">
+           <level>2</level>
+-          <default>2</default>
++          <default>3</default>
+           <constraints>
+             <minimum>1</minimum>
+             <step>1</step>
+@@ -1376,7 +1376,7 @@
+       <group id="2" label="14303">
+         <setting id="epg.epgupdate" type="integer" label="19071" help="36221">
+           <level>2</level>
+-          <default>180</default>
++          <default>120</default>
+           <constraints>
+             <minimum>15</minimum>
+             <step>15</step>
+@@ -2993,7 +2993,7 @@
+       <group id="2" label="14111">
+         <setting id="eventlog.enabled" type="boolean" label="14112" help="36460">
+           <level>1</level>
+-          <default>false</default>
++          <default>true</default>
+           <control type="toggle" />
+         </setting>
+         <setting id="eventlog.enablednotifications" type="boolean" parent="eventlog.enabled" label="14113" help="36461">
+@@ -3017,53 +3017,29 @@
+     </category>
+     <category id="coreelec" label="14278" help="14279">
+       <group id="1" label="131">
+-        <setting id="coreelec.amlogic.noisereduction" type="boolean" label="14280" help="14281">
++        <setting id="coreelec.amlogic.sdr2hdr" type="integer" label="14282" help="14283">
+           <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
+-        </setting>
+-        <setting id="coreelec.amlogic.deinterlacing" type="boolean" label="14282" help="14283">
+-          <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
+-        </setting>
+-        <setting id="coreelec.amlogic.limit8bit" type="boolean" label="14284" help="14285">
+-          <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
+-        </setting>
+-        <setting id="coreelec.amlogic.force422" type="boolean" label="14286" help="14297">
+-          <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
+-        </setting>
+-      </group>
+-      <group id="2" label="14086">
+-        <setting id="coreelec.amlogic.hevcworkaround" type="boolean" label="14288" help="14289">
+-          <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
+-        </setting>
+-      </group>
+-      <group id="3" label="14221">
+-        <setting id="coreelec.amlogic.mutehdmiaudio" type="boolean" label="14290" help="14291">
+-          <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
++          <default>0</default> <!-- OFF -->
++          <constraints>
++            <options>
++              <option label="351">0</option> <!-- OFF -->
++              <option label="16041">1</option> <!-- ON -->
++              <option label="16316">2</option> <!-- AUTO -->
++            </options>
++          </constraints>
++          <control type="list" format="string" />
+         </setting>
+-      </group>
+-      <group id="4" label="10039">
+-        <setting id="coreelec.amlogic.maxgpuclock" type="boolean" label="14292" help="14293">
++        <setting id="coreelec.amlogic.hdr2sdr" type="integer" label="14284" help="14285">
+           <requirement>HAVE_AMCODEC</requirement>
+-          <level>3</level>
+-          <default>false</default>
+-          <control type="toggle" />
++          <default>2</default> <!-- AUTO -->
++          <constraints>
++            <options>
++              <option label="351">0</option> <!-- OFF -->
++              <option label="16041">1</option> <!-- ON -->
++              <option label="16316">2</option> <!-- AUTO -->
++            </options>
++          </constraints>
++          <control type="list" format="string" />
+         </setting>
+       </group>
+     </category>
+--- kodi-0186c4b/addons/resource.language.en_gb/resources/strings.po	2019-06-27 23:51:11.943159117 +0300
++++ kodi-418c88a/addons/resource.language.en_gb/resources/strings.po	2019-06-21 00:54:59.109850733 +0300
+@@ -8336,85 +8336,35 @@ msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14278"
+-msgid "AlexELEC"
++msgid "CoreELEC"
+ msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14279"
+-msgid "This category contains settings added for AlexELEC."
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14280"
+-msgid "Disable noise reduction"
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14281"
+-msgid "Enable this to disable noise reduction. Requires reboot."
++msgid "This category contains settings added for CoreELEC."
+ msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14282"
+-msgid "Disable deinterlacing"
++msgid "Tone map SDR to HDR"
+ msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14283"
+-msgid "Enable this to disable deinterlacing. Requires reboot."
++msgid "Intended for HDR enabled displays - not recommended. Turn this On or set to Auto to have HDR10 mode always on. GUI and SDR content will be tone mapped. Requires reboot."
+ msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14284"
+-msgid "Limit display colour depth to 8-bit"
++msgid "Tone map HDR to SDR"
+ msgstr ""
+ 
+ #: system/settings/settings.xml
+ msgctxt "#14285"
+-msgid "Enable this to limit the display colour depth to 8-bit. Requires reboot."
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14286"
+-msgid "Use 4:2:2 colour subsampling"
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14287"
+-msgid "Enable this to use 4:2:2 colour subsampling. Some displays (usually LG) work better with this. Requires reboot."
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14288"
+-msgid "Enable HEVC seek workaround"
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14289"
+-msgid "Enable this if you have problems with HEVC content after seeking."
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14290"
+-msgid "Disable HDMI audio output"
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14291"
+-msgid "Disable HDMI audio output. Requires a reboot."
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14292"
+-msgid "Enable GPU overclock"
+-msgstr ""
+-
+-#: system/settings/settings.xml
+-msgctxt "#14293"
+-msgid "Enable this to overclock the GPU. WARNING! This will increase chipset temperatures. Requires a reboot."
++msgid "Intended for SDR displays. Turn this On or set to Auto to have HDR content tone mapped to SDR. This improves color saturation and contrast of HDR content on SDR displays. Requires reboot."
+ msgstr ""
+ 
+-#empty strings from id 14294 to 14300
++#empty strings from id 14286 to 14300
+ 
+ #. pvr "channels" settings group label
+ #: system/settings/settings.xml

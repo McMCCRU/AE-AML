@@ -1,0 +1,11 @@
+--- RTL8723BS-aml-ee9d86a.orig/rtl8723BS/Makefile	2019-05-30 01:37:15.648944109 +0300
++++ RTL8723BS-aml-ee9d86a/rtl8723BS/Makefile	2019-06-11 00:54:24.522772109 +0300
+@@ -3,7 +3,7 @@ EXTRA_CFLAGS += -O1
+ #EXTRA_CFLAGS += -O3
+ #EXTRA_CFLAGS += -Wall
+ #EXTRA_CFLAGS += -Wextra
+-#EXTRA_CFLAGS += -Werror
++EXTRA_CFLAGS += -Wno-error
+ #EXTRA_CFLAGS += -pedantic
+ #EXTRA_CFLAGS += -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes -Wmissing-prototypes
+ 

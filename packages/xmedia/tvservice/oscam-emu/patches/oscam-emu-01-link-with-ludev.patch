@@ -1,0 +1,24 @@
+diff -Naurp oscam-emu-80a4352/CMakeLists.txt oscam-emu-80a4352-patch/CMakeLists.txt
+--- oscam-emu-80a4352/CMakeLists.txt	2019-02-08 09:22:53.000000000 +0200
++++ oscam-emu-80a4352-patch/CMakeLists.txt	2019-02-08 09:26:47.000000000 +0200
+@@ -517,7 +517,7 @@ add_library (${csoscam} STATIC ${csoscam
+ 
+ set (exe_name "oscam")
+ add_executable (${exe_name} ${exe_srcs} ${exe_hdrs})
+-target_link_libraries (${exe_name} ${csoscam} ${csmodules} ${csreaders} csctapi cscrypt minilzo ffdecsa)
++target_link_libraries (${exe_name} ${csoscam} ${csmodules} ${csreaders} csctapi cscrypt minilzo ffdecsa udev)
+ if(HAVE_LIBRT AND HAVE_LIBUSB)
+ 	if (LIBUSBDIR)
+ 		set (libusb_link "imp_libusb")
+diff -Naurp oscam-emu-80a4352/utils/CMakeLists.txt oscam-emu-80a4352-patch/utils/CMakeLists.txt
+--- oscam-emu-80a4352/utils/CMakeLists.txt	2019-02-08 09:22:53.000000000 +0200
++++ oscam-emu-80a4352-patch/utils/CMakeLists.txt	2019-02-08 09:27:23.000000000 +0200
+@@ -12,7 +12,7 @@ file (GLOB all_srcs ${exe_srcs})
+ 
+ set (util_name "list_smargo")
+ add_executable (${util_name} ${exe_srcs} ${exe_hdrs})
+-target_link_libraries (${util_name} ${libusb_link} ${rt_link} ${setupapi_link} ${ole32_link} ${shell32_link} ${pthread_link} ${dl_link})
++target_link_libraries (${util_name} ${libusb_link} ${rt_link} ${setupapi_link} ${ole32_link} ${shell32_link} ${pthread_link} ${dl_link} udev)
+ #----------------------- printout resume -----------------------------
+ 
+ message (STATUS "Utils: operating system: ${OSCamOperatingSystem}")

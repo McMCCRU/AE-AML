@@ -1,0 +1,11 @@
+--- RTL8822BU-aml-9df3607.orig/rtl8822BU/Makefile	2019-05-30 01:37:53.293328270 +0300
++++ RTL8822BU-aml-9df3607/rtl8822BU/Makefile	2019-06-11 00:56:44.328016883 +0300
+@@ -3,7 +3,7 @@ EXTRA_CFLAGS += -O1
+ #EXTRA_CFLAGS += -O3
+ #EXTRA_CFLAGS += -Wall
+ #EXTRA_CFLAGS += -Wextra
+-#EXTRA_CFLAGS += -Werror
++EXTRA_CFLAGS += -Wno-error
+ #EXTRA_CFLAGS += -pedantic
+ #EXTRA_CFLAGS += -Wshadow -Wpointer-arith -Wcast-qual -Wstrict-prototypes -Wmissing-prototypes
+ 
