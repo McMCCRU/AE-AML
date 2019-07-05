@@ -3,10 +3,10 @@
 # Copyright (C) 2017-present Team LibreELEC (https://libreelec.tv)
 
 PKG_NAME="linux"
-PKG_VERSION="3d4ab79e"
+PKG_VERSION="58d823f"
 # PKG_SHA256="b28a4d73e47699988cc3cbdf2eb4d6c17257c1856ed595d95c2830be9a501464"
 PKG_LICENSE="GPL"
-PKG_SITE="https://github.com/McMCCRU/linux-amlogic"
+PKG_SITE="https://github.com/CoreELEC/linux-amlogic"
 PKG_URL="$PKG_SITE/archive/$PKG_VERSION.tar.gz"
 PKG_SOURCE_NAME="$PKG_NAME-$LINUX-$PKG_VERSION.tar.gz"
 PKG_DEPENDS_HOST="ccache:host"

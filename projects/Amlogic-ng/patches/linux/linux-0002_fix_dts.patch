@@ -1,0 +1,60 @@
+diff -ruNp linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/arch/arm64/boot/dts/amlogic/g12a_s905x2_u211_512m.dts linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/arch/arm64/boot/dts/amlogic/g12a_s905x2_u211_512m.dts
+--- linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/arch/arm64/boot/dts/amlogic/g12a_s905x2_u211_512m.dts	2019-07-04 23:57:48.540974004 +0300
++++ linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/arch/arm64/boot/dts/amlogic/g12a_s905x2_u211_512m.dts	2019-07-05 00:07:47.697486944 +0300
+@@ -22,6 +22,7 @@
+ 
+ / {
+ 	model = "Amlogic";
++	amlogic-dt-id = "g12a_s905x2_u211_512m";
+ 	compatible = "amlogic, g12a";
+ 	interrupt-parent = <&gic>;
+ 	#address-cells = <2>;
+diff -ruNp linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/arch/arm64/boot/dts/amlogic/g12a_s905y2_u220.dts linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/arch/arm64/boot/dts/amlogic/g12a_s905y2_u220.dts
+--- linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/arch/arm64/boot/dts/amlogic/g12a_s905y2_u220.dts	2019-07-04 23:57:48.540974004 +0300
++++ linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/arch/arm64/boot/dts/amlogic/g12a_s905y2_u220.dts	2019-07-05 00:08:28.565791176 +0300
+@@ -22,6 +22,7 @@
+ 
+ / {
+ 	model = "Amlogic";
++	amlogic-dt-id = "g12a_s905y2_u220";
+ 	compatible = "amlogic, g12a";
+ 	interrupt-parent = <&gic>;
+ 	#address-cells = <2>;
+diff -ruNp linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/arch/arm64/boot/dts/amlogic/g12a_s905y2_u221.dts linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/arch/arm64/boot/dts/amlogic/g12a_s905y2_u221.dts
+--- linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/arch/arm64/boot/dts/amlogic/g12a_s905y2_u221.dts	2019-07-04 23:57:48.540974004 +0300
++++ linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/arch/arm64/boot/dts/amlogic/g12a_s905y2_u221.dts	2019-07-05 00:18:15.738139557 +0300
+@@ -22,6 +22,7 @@
+ 
+ / {
+ 	model = "Amlogic";
++	amlogic-dt-id = "g12a_s905y2_u221";
+ 	compatible = "amlogic, g12a";
+ 	interrupt-parent = <&gic>;
+ 	#address-cells = <2>;
+@@ -44,7 +45,7 @@
+ 
+ 	memory@00000000 {
+ 		device_type = "memory";
+-		linux,usable-memory = <0x0 0x000000 0x0 0x80000000>;
++		linux,usable-memory = <0x0 0x100000 0x0 0x7ff00000>;
+ 	};
+ 
+ 	reserved-memory {
+@@ -712,7 +713,7 @@
+ 	display_size_default = <1920 1080 1920 2160 32>;
+ 	mem_size = <0x00800000 0x1980000 0x100000 0x100000 0x800000>;
+ 	logo_addr = "0x7f800000";
+-	mem_alloc = <0>;
++	mem_alloc = <1>;
+ 	pxp_mode = <0>; /** 0:normal mode 1:pxp mode */
+ };
+ 
+@@ -1189,7 +1190,7 @@
+ };
+ 
+ &sd_emmc_b2 {
+-	status = "disabled";
++	status = "okay";
+ 	sd {
+ 		caps = "MMC_CAP_4_BIT_DATA",
+ 			 "MMC_CAP_MMC_HIGHSPEED",

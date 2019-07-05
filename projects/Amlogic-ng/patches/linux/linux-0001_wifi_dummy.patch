@@ -1,0 +1,52 @@
+diff -ruNp linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/drivers/amlogic/wifi/Kconfig linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/drivers/amlogic/wifi/Kconfig
+--- linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/drivers/amlogic/wifi/Kconfig	2019-07-04 23:57:50.620989927 +0300
++++ linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/drivers/amlogic/wifi/Kconfig	2019-06-27 20:50:21.000000000 +0300
+@@ -5,3 +5,8 @@ config AMLOGIC_WIFI
+ 	default n
+ 	help
+ 		select y to support wifi
++
++config AMLOGIC_WIFI_DUMMY
++	tristate "Amlogic SDIO WiFi turn on and rescan module"
++	depends on AMLOGIC_WIFI
++	default m
+diff -ruNp linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/drivers/amlogic/wifi/Makefile linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/drivers/amlogic/wifi/Makefile
+--- linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/drivers/amlogic/wifi/Makefile	2019-07-04 23:57:50.620989927 +0300
++++ linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/drivers/amlogic/wifi/Makefile	2019-06-27 20:50:21.000000000 +0300
+@@ -1 +1,2 @@
+ obj-$(CONFIG_AMLOGIC_WIFI) +=  wifi_dt.o dhd_static_buf.o
++obj-$(CONFIG_AMLOGIC_WIFI_DUMMY) += wifi_dummy.o
+diff -ruNp linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/drivers/amlogic/wifi/wifi_dummy.c linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/drivers/amlogic/wifi/wifi_dummy.c
+--- linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb.orig/drivers/amlogic/wifi/wifi_dummy.c	1970-01-01 03:00:00.000000000 +0300
++++ linux-amlogic-58d823f2bcee1388570ee0d4e9e0ea20c74b1ffb/drivers/amlogic/wifi/wifi_dummy.c	2019-06-27 20:50:21.000000000 +0300
+@@ -0,0 +1,30 @@
++#include <linux/delay.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("kszaq");
++MODULE_DESCRIPTION("Amlogic WiFi power on and SDIO rescan module");
++
++extern void extern_wifi_set_enable(int);
++extern void sdio_reinit(void);
++
++static int __init wifi_dummy_init(void)
++{
++	printk(KERN_INFO "Triggered SDIO WiFi power on and bus rescan.\n");
++	extern_wifi_set_enable(0);
++	msleep(300);
++	extern_wifi_set_enable(1);
++	msleep(300);
++	sdio_reinit();
++	return 0;
++}
++
++static void __exit wifi_dummy_cleanup(void)
++{
++    printk(KERN_INFO "Cleaning up module.\n");
++}
++
++module_init(wifi_dummy_init);
++module_exit(wifi_dummy_cleanup);

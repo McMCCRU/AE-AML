@@ -3,8 +3,8 @@
 # Copyright (C) 2018-present Team CoreELEC (https://coreelec.org)
 
 PKG_NAME="dvb-latest"
-PKG_VERSION="c23276037794bae357fa8d23e3a4f11af9ad46e9"
-PKG_SHA256="c69d5c6af435887bd46d8da4816f724905e36fd7d080c8e1c437fbe4848ea813"
+PKG_VERSION="8c181825fa4b157679e600565c310841be9f1890"
+PKG_SHA256="ed658d8f65bb31b5f0667f305de09b62d18ff9b4403cdb2e7e460a942a07aec4"
 PKG_LICENSE="GPL"
 PKG_SITE="http://git.linuxtv.org/media_build.git"
 PKG_URL="https://git.linuxtv.org/media_build.git/snapshot/${PKG_VERSION}.tar.gz"
@@ -30,7 +30,7 @@ case "$LINUX" in
 esac
 
 configure_package() {
-  if [ "$PROJECT" = "Amlogic" -o "$PROJECT" = "Amlogic-dbl" -o "$PROJECT" = "S805" -o "$PROJECT" = "S812" ]; then
+  if [ "$PROJECT" = "Amlogic" -o "$PROJECT" = "Amlogic-ng" ]; then
     PKG_PATCH_DIRS+=" amlogic-common"
     PKG_DEPENDS_TARGET="$PKG_DEPENDS_TARGET media_tree_aml"
     PKG_NEED_UNPACK="$PKG_NEED_UNPACK media_tree_aml"
@@ -45,7 +45,7 @@ pre_make_target() {
 make_target() {
   cp -RP $(get_build_dir media_tree)/* $PKG_BUILD/linux
 
-  if [ "$PROJECT" = "Amlogic" -o "$PROJECT" = "Amlogic-dbl" -o "$PROJECT" = "S805" -o "$PROJECT" = "S812" ]; then
+  if [ "$PROJECT" = "Amlogic" -o "$PROJECT" = "Amlogic-ng" ]; then
     cp -Lr $(get_build_dir media_tree_aml)/* $PKG_BUILD/linux
 
     # compile modules
@@ -59,7 +59,7 @@ make_target() {
   kernel_make VER=$KERNEL_VER SRCDIR=$(kernel_path) allyesconfig
 
   # hack to workaround media_build bug
-  if [ "$PROJECT" = "Amlogic" -o "$PROJECT" = "Amlogic-dbl" -o "$PROJECT" = "S805" -o "$PROJECT" = "S812" ]; then
+  if [ "$PROJECT" = "Amlogic" ]; then
     sed -e 's/CONFIG_DVB_LGDT3306A=m/# CONFIG_DVB_LGDT3306A is not set/g' -i v4l/.config
     sed -e 's/CONFIG_VIDEO_S5C73M3=m/# CONFIG_VIDEO_S5C73M3 is not set/g' -i $PKG_BUILD/v4l/.config
     sed -e 's/CONFIG_VIDEO_SAA7146_VV=m/# CONFIG_VIDEO_SAA7146_VV is not set/g' -i $PKG_BUILD/v4l/.config
